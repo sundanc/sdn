@@ -6,9 +6,10 @@
 #include <time.h>
 #include <termios.h>
 #include <ctype.h>
+#include <fcntl.h>
 
-#define MAX_LINE 80 /* The maximum length command */
-#define MAX_ARGS 20 /* The maximum number of arguments */
+#define MAX_LINE 80 
+#define MAX_ARGS 20 
 #define HISTORY_FILE_NAME ".sdn_history"
 #define MAX_HISTORY_ENTRIES 1000
 
@@ -22,7 +23,6 @@ typedef struct {
     int count;
 } HistoryCache;
 
-// Function prototype
 void get_history_file_path(char *path_buffer, size_t buffer_size);
 
 void disable_raw_mode() {
@@ -253,21 +253,71 @@ void display_history() {
     }
 }
 
-// Function to parse the command line input
-int parse_input(char *input, char **args) {
-    int i = 0;
+int parse_command(char *input_line, char **args, 
+                  char **inputFile, char **outputFile, int *is_append) {
+    int argc = 0;
     int background = 0;
-    char *token = strtok(input, " \n\t\r");
-    while (token != NULL && i < MAX_ARGS - 1) {
-        args[i++] = token;
+    
+    *inputFile = NULL;
+    *outputFile = NULL;
+    *is_append = 0;
+
+    char *temp_tokens[MAX_ARGS];
+    int token_count = 0;
+    char *token = strtok(input_line, " \n\t\r");
+    while (token != NULL && token_count < MAX_ARGS - 1) {
+        temp_tokens[token_count++] = token;
         token = strtok(NULL, " \n\t\r");
     }
-    args[i] = NULL; // Null-terminate the arguments array
+    temp_tokens[token_count] = NULL;
 
-    if (i > 0 && strcmp(args[i-1], "&") == 0) {
-        background = 1;
-        args[i-1] = NULL; 
+    if (token_count == 0) {
+        args[0] = NULL;
+        return 0; 
     }
+
+    if (token_count > 0 && strcmp(temp_tokens[token_count - 1], "&") == 0) {
+        background = 1;
+        temp_tokens[token_count - 1] = NULL; 
+        token_count--; 
+    }
+
+    for (int i = 0; i < token_count; ) {
+        if (strcmp(temp_tokens[i], "<") == 0) {
+            if (i + 1 < token_count) {
+                *inputFile = temp_tokens[i + 1];
+                i += 2; 
+            } else {
+                fprintf(stderr, "sdn: syntax error near `<'\n");
+                args[0] = NULL; return -1; 
+            }
+        } else if (strcmp(temp_tokens[i], ">") == 0) {
+            if (i + 1 < token_count) {
+                *outputFile = temp_tokens[i + 1];
+                *is_append = 0;
+                i += 2; 
+            } else {
+                fprintf(stderr, "sdn: syntax error near `>'\n");
+                args[0] = NULL; return -1; 
+            }
+        } else if (strcmp(temp_tokens[i], ">>") == 0) {
+            if (i + 1 < token_count) {
+                *outputFile = temp_tokens[i + 1];
+                *is_append = 1;
+                i += 2; 
+            } else {
+                fprintf(stderr, "sdn: syntax error near `>>'\n");
+                args[0] = NULL; return -1; 
+            }
+        } else {
+            if (argc < MAX_ARGS - 1) {
+                args[argc++] = temp_tokens[i];
+            }
+            i++;
+        }
+    }
+    args[argc] = NULL;
+    
     return background;
 }
 
@@ -278,6 +328,10 @@ int main(void) {
     pid_t pid, wpid; 
     int status;
     int background;
+    
+    char *inputFile = NULL;
+    char *outputFile = NULL;
+    int appendMode = 0;
     
     HistoryCache history_cache = {0};
     load_history_cache(&history_cache);
@@ -294,21 +348,17 @@ int main(void) {
         int result = read_line_with_completion(input, sizeof(input), &history_cache);
         
         if (result == -1) {
-            // Handle EOF (Ctrl+D)
             printf("\nExiting sdn.\n");
             break;
         }
         
-        // Copy for history
         strncpy(history_entry_buffer, input, MAX_LINE - 1);
         history_entry_buffer[MAX_LINE - 1] = '\0';
 
-        // Handle empty command
         if (strlen(input) == 0) {
             continue;
         }
 
-        // Save to history and update cache
         if (strlen(history_entry_buffer) > 0) {
             save_to_history(history_entry_buffer);
             
@@ -326,7 +376,6 @@ int main(void) {
             }
         }
         
-        // Handle "exit" command
         if (strcmp(input, "exit") == 0) {
             while ((wpid = waitpid(-1, &status, WNOHANG)) > 0) {
                 printf("Shell: Background process with PID %d terminated before exit.\n", wpid);
@@ -335,11 +384,17 @@ int main(void) {
             break;
         }
 
-        // Parse the input
-        background = parse_input(input, args);
+        background = parse_command(input, args, &inputFile, &outputFile, &appendMode);
 
-        if (args[0] == NULL) { 
+        if (background == -1) { 
             continue;
+        }
+        
+        if (args[0] == NULL) {
+            if (inputFile || outputFile) {
+                 fprintf(stderr, "sdn: missing command for redirection\n");
+            }
+            continue; 
         }
         
         if (strcmp(args[0], "cd") == 0) {
@@ -366,25 +421,52 @@ int main(void) {
             continue;
         }
 
-        // Fork a child process
         pid = fork();
 
         if (pid < 0) {
-            // Error forking
             perror("fork failed");
             exit(EXIT_FAILURE);
         } else if (pid == 0) {
-            // Child process
+            if (inputFile) {
+                int fd_in = open(inputFile, O_RDONLY);
+                if (fd_in == -1) {
+                    perror("sdn: open input file");
+                    exit(EXIT_FAILURE);
+                }
+                if (dup2(fd_in, STDIN_FILENO) == -1) {
+                    perror("sdn: dup2 input");
+                    exit(EXIT_FAILURE);
+                }
+                close(fd_in);
+            }
+
+            if (outputFile) {
+                int flags = O_WRONLY | O_CREAT;
+                if (appendMode) {
+                    flags |= O_APPEND;
+                } else {
+                    flags |= O_TRUNC;
+                }
+                int fd_out = open(outputFile, flags, 0644);
+                if (fd_out == -1) {
+                    perror("sdn: open output file");
+                    exit(EXIT_FAILURE);
+                }
+                if (dup2(fd_out, STDOUT_FILENO) == -1) {
+                    perror("sdn: dup2 output");
+                    exit(EXIT_FAILURE);
+                }
+                close(fd_out);
+            }
+            
             if (execvp(args[0], args) == -1) {
-                perror("execvp failed");
-                exit(EXIT_FAILURE); // Exit child if execvp fails
+                perror("sdn: execvp failed");
+                exit(EXIT_FAILURE); 
             }
         } else {
-            // Parent process
             if (background) {
                 printf("[%d] %s &\n", pid, args[0]); 
             } else {
-                // Wait for the foreground child to complete
                 waitpid(pid, &status, 0);
             }
         }
