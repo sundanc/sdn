@@ -9,6 +9,7 @@
 #include <ctype.h>
 #include <fcntl.h>
 #include <dirent.h> // Add for directory operations
+#include <glob.h>   // For wildcard expansion (globbing)
 
 #define MAX_LINE 80 
 #define MAX_ARGS 20 
@@ -596,61 +597,127 @@ void display_history() {
     }
 }
 
+void free_command_segment_internals(CommandSegment *segment) {
+    for (int i = 0; segment->args[i] != NULL; i++) {
+        free(segment->args[i]);
+        segment->args[i] = NULL;
+    }
+    if (segment->inputFile) {
+        free(segment->inputFile);
+        segment->inputFile = NULL;
+    }
+    if (segment->outputFile) {
+        free(segment->outputFile);
+        segment->outputFile = NULL;
+    }
+}
+
 int parse_single_command_segment(char *segment_str, CommandSegment *cmd_segment) {
-    int argc = 0;
+    // Initialize segment
     cmd_segment->inputFile = NULL;
     cmd_segment->outputFile = NULL;
     cmd_segment->appendMode = 0;
-    
-    char *temp_tokens[MAX_ARGS];
-    int token_count = 0;
-    char *token = strtok(segment_str, " \n\t\r");
-    while (token != NULL && token_count < MAX_ARGS - 1) {
-        temp_tokens[token_count++] = token;
+    for(int i=0; i<MAX_ARGS; ++i) cmd_segment->args[i] = NULL;
+
+    char segment_str_copy[MAX_LINE];
+    strncpy(segment_str_copy, segment_str, MAX_LINE - 1);
+    segment_str_copy[MAX_LINE - 1] = '\0';
+
+    char *raw_tokens[MAX_ARGS];
+    int raw_token_count = 0;
+    char *token = strtok(segment_str_copy, " \n\t\r");
+    while (token != NULL && raw_token_count < MAX_ARGS) {
+        raw_tokens[raw_token_count++] = token;
         token = strtok(NULL, " \n\t\r");
     }
-    temp_tokens[token_count] = NULL;
 
-    if (token_count == 0) {
-        cmd_segment->args[0] = NULL;
+    if (raw_token_count == 0) {
         return 0; 
     }
-    
-    for (int i = 0; i < token_count; ) {
-        if (strcmp(temp_tokens[i], "<") == 0) {
-            if (i + 1 < token_count) {
-                cmd_segment->inputFile = temp_tokens[i + 1];
-                i += 2; 
+
+    int current_arg_idx = 0;
+    for (int i = 0; i < raw_token_count; ) {
+        char *current_raw_token = raw_tokens[i];
+
+        if (strcmp(current_raw_token, "<") == 0) {
+            if (i + 1 < raw_token_count) {
+                if (cmd_segment->inputFile) free(cmd_segment->inputFile);
+                cmd_segment->inputFile = strdup(raw_tokens[i + 1]);
+                if (!cmd_segment->inputFile) { perror("sdn: strdup error"); free_command_segment_internals(cmd_segment); return -1; }
+                i += 2;
             } else {
                 fprintf(stderr, "sdn: syntax error near `<'\n");
-                cmd_segment->args[0] = NULL; return -1; 
+                free_command_segment_internals(cmd_segment); return -1;
             }
-        } else if (strcmp(temp_tokens[i], ">") == 0) {
-            if (i + 1 < token_count) {
-                cmd_segment->outputFile = temp_tokens[i + 1];
+        } else if (strcmp(current_raw_token, ">") == 0) {
+            if (i + 1 < raw_token_count) {
+                if (cmd_segment->outputFile) free(cmd_segment->outputFile);
+                cmd_segment->outputFile = strdup(raw_tokens[i + 1]);
+                if (!cmd_segment->outputFile) { perror("sdn: strdup error"); free_command_segment_internals(cmd_segment); return -1; }
                 cmd_segment->appendMode = 0;
-                i += 2; 
+                i += 2;
             } else {
                 fprintf(stderr, "sdn: syntax error near `>'\n");
-                cmd_segment->args[0] = NULL; return -1; 
+                free_command_segment_internals(cmd_segment); return -1;
             }
-        } else if (strcmp(temp_tokens[i], ">>") == 0) {
-            if (i + 1 < token_count) {
-                cmd_segment->outputFile = temp_tokens[i + 1];
+        } else if (strcmp(current_raw_token, ">>") == 0) {
+            if (i + 1 < raw_token_count) {
+                if (cmd_segment->outputFile) free(cmd_segment->outputFile);
+                cmd_segment->outputFile = strdup(raw_tokens[i + 1]);
+                if (!cmd_segment->outputFile) { perror("sdn: strdup error"); free_command_segment_internals(cmd_segment); return -1; }
                 cmd_segment->appendMode = 1;
-                i += 2; 
+                i += 2;
             } else {
                 fprintf(stderr, "sdn: syntax error near `>>'\n");
-                cmd_segment->args[0] = NULL; return -1; 
+                free_command_segment_internals(cmd_segment); return -1;
             }
-        } else {
-            if (argc < MAX_ARGS - 1) {
-                cmd_segment->args[argc++] = temp_tokens[i];
+        } else { // Command or argument
+            if (strpbrk(current_raw_token, "*?[]") != NULL) { // Has wildcards
+                glob_t glob_result;
+                memset(&glob_result, 0, sizeof(glob_result));
+                // GLOB_TILDE: Expands tilde.
+                // GLOB_NOCHECK: If pattern doesn't match, return pattern itself.
+                // GLOB_BRACE: Expands {a,b}
+                int glob_flags = GLOB_TILDE | GLOB_NOCHECK | GLOB_BRACE;
+                int ret = glob(current_raw_token, glob_flags, NULL, &glob_result);
+
+                if (ret == 0) { // Success
+                    for (size_t k = 0; k < glob_result.gl_pathc; k++) {
+                        if (current_arg_idx < MAX_ARGS - 1) {
+                            cmd_segment->args[current_arg_idx] = strdup(glob_result.gl_pathv[k]);
+                            if (!cmd_segment->args[current_arg_idx]) { perror("sdn: strdup error"); globfree(&glob_result); free_command_segment_internals(cmd_segment); return -1; }
+                            current_arg_idx++;
+                        } else {
+                            fprintf(stderr, "sdn: too many arguments after wildcard expansion for '%s'\n", current_raw_token);
+                            globfree(&glob_result);
+                            free_command_segment_internals(cmd_segment); return -1;
+                        }
+                    }
+                } else if (ret == GLOB_NOMATCH) { 
+                    // if (current_arg_idx < MAX_ARGS - 1) {
+                    //    cmd_segment->args[current_arg_idx++] = strdup(current_raw_token);
+                    // } else { /* error */ }
+                } else { // Other glob errors (GLOB_NOSPACE, GLOB_ABORTED)
+                    fprintf(stderr, "sdn: glob error for pattern '%s'\n", current_raw_token);
+                    globfree(&glob_result);
+                    free_command_segment_internals(cmd_segment); return -1;
+                }
+                globfree(&glob_result);
+                i++;
+            } else { // No wildcards
+                if (current_arg_idx < MAX_ARGS - 1) {
+                    cmd_segment->args[current_arg_idx] = strdup(current_raw_token);
+                    if (!cmd_segment->args[current_arg_idx]) { perror("sdn: strdup error"); free_command_segment_internals(cmd_segment); return -1; }
+                    current_arg_idx++;
+                } else {
+                    fprintf(stderr, "sdn: too many arguments for command\n");
+                    free_command_segment_internals(cmd_segment); return -1;
+                }
+                i++;
             }
-            i++;
         }
     }
-    cmd_segment->args[argc] = NULL;
+    cmd_segment->args[current_arg_idx] = NULL; 
     return 0;
 }
 
@@ -725,6 +792,10 @@ void execute_pipeline(CommandSegment segments[], int num_segments, int backgroun
                 close(fd_out);
             }
             
+            if (segments[i].args[0] == NULL) {
+                fprintf(stderr, "sdn: attempt to execute empty command\n");
+                exit(EXIT_FAILURE);
+            }
             if (execvp(segments[i].args[0], segments[i].args) == -1) {
                 perror("sdn: execvp failed");
                 exit(EXIT_FAILURE);
@@ -875,10 +946,17 @@ int main(void) {
             command_str = strtok_r(NULL, "|", &saveptr_pipe);
         }
 
-        if (num_segments == -1 || num_segments == 0) {
+        if (num_segments == -1 || (num_segments == 0 && strlen(input_line_for_parsing) > 0) ) { 
+             for (int k = 0; k < MAX_COMMAND_SEGMENTS; k++) { 
+                free_command_segment_internals(&command_segments[k]);
+            }
+            continue;
+        }
+        if (num_segments == 0) {
             continue;
         }
         
+        int built_in_executed = 0;
         if (num_segments == 1 && command_segments[0].args[0] != NULL) {
             if (strcmp(command_segments[0].args[0], "cd") == 0) {
                 if (command_segments[0].args[1] == NULL) {
@@ -895,20 +973,26 @@ int main(void) {
                         perror("sdn: cd failed");
                     }
                 }
-                continue; 
+                built_in_executed = 1;
             } else if (strcmp(command_segments[0].args[0], "history") == 0) {
                 display_history();
-                continue;
+                built_in_executed = 1;
             } else if (strcmp(command_segments[0].args[0], "alias") == 0) {
                 handle_alias_builtin(command_segments[0].args);
-                continue;
+                built_in_executed = 1;
             } else if (strcmp(command_segments[0].args[0], "unalias") == 0) {
                 handle_unalias_builtin(command_segments[0].args);
-                continue;
+                built_in_executed = 1;
             }
         }
 
-        execute_pipeline(command_segments, num_segments, overall_background);
+        if (!built_in_executed) {
+            execute_pipeline(command_segments, num_segments, overall_background);
+        }
+
+        for (int k = 0; k < num_segments; k++) {
+            free_command_segment_internals(&command_segments[k]);
+        }
     }
 
     free_history_cache(&history_cache);
