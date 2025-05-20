@@ -4,8 +4,59 @@
 #include <unistd.h>
 #include <sys/wait.h>
 
+
 #define MAX_LINE 80 /* The maximum length command */
 #define MAX_ARGS 20 /* The maximum number of arguments */
+#define HISTORY_FILE_NAME ".sdn_history"
+
+
+void get_history_file_path(char *path_buffer, size_t buffer_size) {
+    char *home_dir = getenv("HOME");
+    if (home_dir) {
+        snprintf(path_buffer, buffer_size, "%s/%s", home_dir, HISTORY_FILE_NAME);
+    } else {
+        
+        strncpy(path_buffer, HISTORY_FILE_NAME, buffer_size -1);
+        path_buffer[buffer_size - 1] = '\0';
+    }
+}
+
+
+void save_to_history(const char *command) {
+    char history_file_path[FILENAME_MAX];
+    get_history_file_path(history_file_path, sizeof(history_file_path));
+
+    FILE *fp = fopen(history_file_path, "a"); 
+    if (fp) {
+        fprintf(fp, "%s\n", command);
+        fclose(fp);
+    } else {
+        perror("sdn: error writing to history file");
+    }
+}
+
+
+void display_history() {
+    char history_file_path[FILENAME_MAX];
+    get_history_file_path(history_file_path, sizeof(history_file_path));
+    FILE *fp = fopen(history_file_path, "r");
+    if (fp) {
+        char line[MAX_LINE + 2]; 
+        int count = 1;
+        while (fgets(line, sizeof(line), fp)) {
+            printf("%5d  %s", count++, line);
+        }
+        fclose(fp);
+    } else {
+        
+        if (access(history_file_path, F_OK) == -1) {
+             
+             
+        } else {
+            perror("sdn: error reading history file");
+        }
+    }
+}
 
 // Function to parse the command line input
 int parse_input(char *input, char **args) {
@@ -27,6 +78,7 @@ int parse_input(char *input, char **args) {
 
 int main(void) {
     char input[MAX_LINE];
+    char history_entry_buffer[MAX_LINE];
     char *args[MAX_ARGS];
     pid_t pid, wpid; 
     int status;
@@ -50,7 +102,12 @@ int main(void) {
             break;
         }
 
-        // Remove trailing newline character
+        
+        strncpy(history_entry_buffer, input, MAX_LINE - 1);
+        history_entry_buffer[MAX_LINE - 1] = '\0'; 
+        history_entry_buffer[strcspn(history_entry_buffer, "\n")] = 0; 
+
+        // Prepare input for parsing
         input[strcspn(input, "\n")] = 0;
 
         // Handle empty command
@@ -58,6 +115,11 @@ int main(void) {
             continue;
         }
 
+        
+        if (strlen(history_entry_buffer) > 0) {
+            save_to_history(history_entry_buffer);
+        }
+        
         // Handle "exit" command
         if (strcmp(input, "exit") == 0) {
             
@@ -74,7 +136,6 @@ int main(void) {
         if (args[0] == NULL) { 
             continue;
         }
-
         
         if (strcmp(args[0], "cd") == 0) {
             if (args[1] == NULL) {
@@ -95,6 +156,9 @@ int main(void) {
                 }
             }
             continue; 
+        } else if (strcmp(args[0], "history") == 0) {
+            display_history();
+            continue;
         }
 
         // Fork a child process
