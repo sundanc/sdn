@@ -71,6 +71,32 @@ int main(void) {
         // Parse the input
         background = parse_input(input, args);
 
+        if (args[0] == NULL) { 
+            continue;
+        }
+
+        
+        if (strcmp(args[0], "cd") == 0) {
+            if (args[1] == NULL) {
+                
+                
+                
+                char *home_dir = getenv("HOME");
+                if (home_dir) {
+                    if (chdir(home_dir) != 0) {
+                        perror("sdn: cd failed");
+                    }
+                } else {
+                    fprintf(stderr, "sdn: cd: HOME not set\n");
+                }
+            } else {
+                if (chdir(args[1]) != 0) {
+                    perror("sdn: cd failed");
+                }
+            }
+            continue; 
+        }
+
         // Fork a child process
         pid = fork();
 
