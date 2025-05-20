@@ -1,3 +1,4 @@
+#define _DEFAULT_SOURCE // For DT_DIR
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -7,6 +8,7 @@
 #include <termios.h>
 #include <ctype.h>
 #include <fcntl.h>
+#include <dirent.h> // Add for directory operations
 
 #define MAX_LINE 80 
 #define MAX_ARGS 20 
@@ -31,6 +33,12 @@ typedef struct {
     int appendMode;
 } CommandSegment;
 
+// Helper structure to store matching files
+typedef struct {
+    char **files;
+    int count;
+    int capacity;
+} FileMatches;
 
 void get_history_file_path(char *path_buffer, size_t buffer_size);
 
@@ -103,11 +111,142 @@ void free_history_cache(HistoryCache *cache) {
     cache->count = 0;
 }
 
+// Initialize FileMatches structure
+void init_file_matches(FileMatches *matches) {
+    matches->capacity = 10;
+    matches->files = malloc(matches->capacity * sizeof(char*));
+    matches->count = 0;
+}
+
+// Free memory used by FileMatches
+void free_file_matches(FileMatches *matches) {
+    for (int i = 0; i < matches->count; i++) {
+        free(matches->files[i]);
+    }
+    free(matches->files);
+    matches->count = 0;
+    matches->capacity = 0;
+}
+
+// Add a file to FileMatches
+void add_file_match(FileMatches *matches, const char *filename) {
+    if (matches->count >= matches->capacity) {
+        matches->capacity *= 2;
+        matches->files = realloc(matches->files, matches->capacity * sizeof(char*));
+    }
+    matches->files[matches->count++] = strdup(filename);
+}
+
+// Extract the word being completed
+char *get_current_word(const char *buffer, int position) {
+    if (position == 0) return strdup("");
+    
+    int word_start = position;
+    while (word_start > 0 && !isspace(buffer[word_start - 1])) {
+        word_start--;
+    }
+    
+    int word_len = position - word_start;
+    char *word = malloc(word_len + 1);
+    strncpy(word, buffer + word_start, word_len);
+    word[word_len] = '\0';
+    
+    return word;
+}
+
+// Find files that match the prefix
+void find_matching_files(const char *prefix, FileMatches *matches) {
+    DIR *dir;
+    struct dirent *entry;
+    
+    char *dir_path = ".";
+    char *name_prefix = strdup(prefix);
+    
+    // Check if prefix contains a directory path
+    char *last_slash = strrchr(prefix, '/');
+    if (last_slash) {
+        // Extract directory path and filename prefix
+        int dir_len = last_slash - prefix + 1;
+        dir_path = malloc(dir_len + 1);
+        strncpy(dir_path, prefix, dir_len);
+        dir_path[dir_len] = '\0';
+        
+        free(name_prefix);
+        name_prefix = strdup(last_slash + 1);
+    }
+    
+    dir = opendir(dir_path);
+    if (!dir) {
+        if (strcmp(dir_path, ".") != 0) free(dir_path);
+        free(name_prefix);
+        return;
+    }
+    
+    while ((entry = readdir(dir)) != NULL) {
+        // Skip hidden files unless the prefix starts with a dot
+        if (entry->d_name[0] == '.' && name_prefix[0] != '.') {
+            if (strcmp(entry->d_name, ".") != 0 && strcmp(entry->d_name, "..") != 0) {
+                continue;
+            }
+        }
+        
+        // Add file if it matches the prefix
+        if (strncmp(entry->d_name, name_prefix, strlen(name_prefix)) == 0) {
+            char *full_path;
+            if (strcmp(dir_path, ".") == 0) {
+                full_path = strdup(entry->d_name);
+            } else {
+                full_path = malloc(strlen(dir_path) + strlen(entry->d_name) + 1);
+                sprintf(full_path, "%s%s", dir_path, entry->d_name);
+            }
+            
+            // Add a slash to directories
+            if (entry->d_type == DT_DIR) {
+                char *with_slash = malloc(strlen(full_path) + 2);
+                sprintf(with_slash, "%s/", full_path);
+                free(full_path);
+                full_path = with_slash;
+            }
+            
+            add_file_match(matches, full_path);
+            free(full_path);
+        }
+    }
+    
+    closedir(dir);
+    if (strcmp(dir_path, ".") != 0) free(dir_path);
+    free(name_prefix);
+}
+
+// Find the longest common prefix among matching files
+char *find_common_prefix(FileMatches *matches) {
+    if (matches->count == 0) return strdup("");
+    
+    char *first = matches->files[0];
+    int prefix_len = strlen(first);
+    
+    for (int i = 1; i < matches->count; i++) {
+        int j = 0;
+        while (j < prefix_len && first[j] == matches->files[i][j]) {
+            j++;
+        }
+        prefix_len = j;
+    }
+    
+    char *common = malloc(prefix_len + 1);
+    strncpy(common, first, prefix_len);
+    common[prefix_len] = '\0';
+    
+    return common;
+}
+
 int read_line_with_completion(char *buffer, int max_size, HistoryCache *cache) {
     int c;
     int position = 0;
-    char suggestion[MAX_LINE] = {0};
+    char suggestion[MAX_LINE] = {0}; // Initialize to empty
     int history_nav_idx = cache->count; // Current position in history navigation
+    FileMatches file_matches;
+    init_file_matches(&file_matches);
 
     memset(buffer, 0, max_size);
     enable_raw_mode();
@@ -145,10 +284,11 @@ int read_line_with_completion(char *buffer, int max_size, HistoryCache *cache) {
                     }
                     break;
             }
+            fflush(stdout); // Ensure prompt and buffer are displayed
         } else if (c == '\n' || c == '\r') {
             printf("\n");
             break;
-        } else if (c == 127 || c == '\b') {
+        } else if (c == 127 || c == '\b') { // Backspace
             if (position > 0) {
                 position--;
                 buffer[position] = '\0';
@@ -157,18 +297,21 @@ int read_line_with_completion(char *buffer, int max_size, HistoryCache *cache) {
                 printf("\033[2K\r"); 
                 printf("sdn> %s", buffer);
                 
+                suggestion[0] = '\0'; // Clear previous suggestion first
                 char *match = find_matching_command(buffer, cache);
-                if (match && strlen(buffer) > 0) { // Only suggest if buffer is not empty
-                    strncpy(suggestion, match + position, MAX_LINE -1);
+                if (match && strlen(buffer) > 0) { 
+                    strncpy(suggestion, match + position, MAX_LINE -1); // position is new strlen(buffer)
                     suggestion[MAX_LINE-1] = '\0';
-                    printf("%s%s%s", ANSI_COLOR_GRAY, suggestion, ANSI_COLOR_RESET);
-                    printf("\033[%dD", (int)strlen(suggestion)); 
-                } else {
-                    suggestion[0] = '\0';
+                    if (strlen(suggestion) > 0) {
+                        printf("%s%s%s", ANSI_COLOR_GRAY, suggestion, ANSI_COLOR_RESET);
+                        printf("\033[%dD", (int)strlen(suggestion)); 
+                    }
                 }
             }
+            fflush(stdout); // Ensure changes are displayed
         } else if (c == '\t') {
             if (suggestion[0] != '\0') {
+                // Handle command history completion as before
                 if (position + strlen(suggestion) < max_size -1) {
                     strcat(buffer, suggestion);
                     position += strlen(suggestion);
@@ -177,10 +320,74 @@ int read_line_with_completion(char *buffer, int max_size, HistoryCache *cache) {
                 printf("\033[2K\r"); 
                 printf("sdn> %s", buffer);
                 suggestion[0] = '\0';
-                history_nav_idx = cache->count; // Editing, so reset history navigation
+                history_nav_idx = cache->count;
+            } else {
+                // Handle file completion
+                char *word = get_current_word(buffer, position);
+                
+                // Only attempt file completion if we have a word
+                if (strlen(word) > 0) {
+                    free_file_matches(&file_matches);
+                    init_file_matches(&file_matches);
+                    find_matching_files(word, &file_matches);
+                    
+                    if (file_matches.count == 1) {
+                        // Single match - complete the word
+                        int word_start = position - strlen(word);
+                        int completion_len = strlen(file_matches.files[0]);
+                        
+                        if (word_start + completion_len < max_size - 1) {
+                            // Remove the partial word
+                            position = word_start;
+                            buffer[position] = '\0';
+                            
+                            // Add the complete filename
+                            strcat(buffer, file_matches.files[0]);
+                            position += completion_len;
+                            
+                            printf("\033[2K\r");
+                            printf("sdn> %s", buffer);
+                        }
+                    } else if (file_matches.count > 1) {
+                        // Multiple matches - find common prefix and show options
+                        char *common = find_common_prefix(&file_matches);
+                        
+                        // Complete to the common prefix if it's longer than current word
+                        if (strlen(common) > strlen(word)) {
+                            int word_start = position - strlen(word);
+                            int completion_len = strlen(common);
+                            
+                            if (word_start + completion_len < max_size - 1) {
+                                // Remove the partial word
+                                position = word_start;
+                                buffer[position] = '\0';
+                                
+                                // Add the common prefix
+                                strcat(buffer, common);
+                                position += completion_len;
+                            }
+                        }
+                        
+                        // Display all matches below
+                        printf("\n");
+                        for (int i = 0; i < file_matches.count; i++) {
+                            printf("%s  ", file_matches.files[i]);
+                            if ((i + 1) % 4 == 0) printf("\n");
+                        }
+                        if (file_matches.count % 4 != 0) printf("\n");
+                        
+                        // Redraw the prompt and buffer
+                        printf("sdn> %s", buffer);
+                        
+                        free(common);
+                    }
+                }
+                free(word);
             }
-        } else if (c == 4) {
+            fflush(stdout);
+        } else if (c == 4) { // CTRL+D
             disable_raw_mode();
+            free_file_matches(&file_matches);
             return -1;
         } else if (isprint(c)) {
             if (position < max_size - 1) {
@@ -188,22 +395,27 @@ int read_line_with_completion(char *buffer, int max_size, HistoryCache *cache) {
                 buffer[position] = '\0';
                 history_nav_idx = cache->count; // Editing, so reset history navigation
                 
-                printf("%c", c);
+                printf("\033[2K\r"); // Clear entire line, cursor to beginning
+                printf("sdn> %s", buffer); // Print prompt and updated buffer
                 
+                suggestion[0] = '\0'; // Clear previous suggestion
                 char *match = find_matching_command(buffer, cache);
-                if (match) {
-                    strncpy(suggestion, match + position, MAX_LINE -1);
+                // `position` is current strlen(buffer)
+                if (match) { // find_matching_command returns NULL if strlen(buffer) is 0
+                    strncpy(suggestion, match + position, MAX_LINE - 1);
                     suggestion[MAX_LINE-1] = '\0';
-                    printf("%s%s%s", ANSI_COLOR_GRAY, suggestion, ANSI_COLOR_RESET);
-                    printf("\033[%dD", (int)strlen(suggestion)); 
-                } else {
-                    suggestion[0] = '\0';
+                    if (strlen(suggestion) > 0) {
+                        printf("%s%s%s", ANSI_COLOR_GRAY, suggestion, ANSI_COLOR_RESET);
+                        printf("\033[%dD", (int)strlen(suggestion)); // Move cursor back
+                    }
                 }
             }
+            fflush(stdout); // Ensure character and suggestion are displayed
         }
     }
     
     disable_raw_mode();
+    free_file_matches(&file_matches);
     return position;
 }
 
