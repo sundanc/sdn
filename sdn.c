@@ -8,14 +8,21 @@
 #define MAX_ARGS 20 /* The maximum number of arguments */
 
 // Function to parse the command line input
-void parse_input(char *input, char **args) {
+int parse_input(char *input, char **args) {
     int i = 0;
+    int background = 0;
     char *token = strtok(input, " \n\t\r");
     while (token != NULL && i < MAX_ARGS - 1) {
         args[i++] = token;
         token = strtok(NULL, " \n\t\r");
     }
     args[i] = NULL; // Null-terminate the arguments array
+
+    if (i > 0 && strcmp(args[i-1], "&") == 0) {
+        background = 1;
+        args[i-1] = NULL; 
+    }
+    return background;
 }
 
 int main(void) {
@@ -23,6 +30,7 @@ int main(void) {
     char *args[MAX_ARGS];
     pid_t pid;
     int status;
+    int background; 
 
     while (1) {
         printf("sdn> ");
@@ -50,7 +58,7 @@ int main(void) {
         }
 
         // Parse the input
-        parse_input(input, args);
+        background = parse_input(input, args);
 
         // Fork a child process
         pid = fork();
@@ -67,8 +75,12 @@ int main(void) {
             }
         } else {
             // Parent process
-            // Wait for the child to complete
-            waitpid(pid, &status, 0);
+            if (background) {
+                printf("[%d] %s &\n", pid, args[0]); 
+            } else {
+                // Wait for the foreground child to complete
+                waitpid(pid, &status, 0);
+            }
         }
     }
 
