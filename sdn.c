@@ -28,11 +28,18 @@ int parse_input(char *input, char **args) {
 int main(void) {
     char input[MAX_LINE];
     char *args[MAX_ARGS];
-    pid_t pid;
+    pid_t pid, wpid; 
     int status;
     int background; 
 
     while (1) {
+        
+        while ((wpid = waitpid(-1, &status, WNOHANG)) > 0) {
+            
+            
+            printf("Shell: Background process with PID %d terminated.\n", wpid);
+        }
+
         printf("sdn> ");
         fflush(stdout); // Ensure the prompt is displayed
 
@@ -53,6 +60,10 @@ int main(void) {
 
         // Handle "exit" command
         if (strcmp(input, "exit") == 0) {
+            
+            while ((wpid = waitpid(-1, &status, WNOHANG)) > 0) {
+                 printf("Shell: Background process with PID %d terminated before exit.\n", wpid);
+            }
             printf("Exiting sdn.\n");
             break;
         }
