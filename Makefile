@@ -18,10 +18,14 @@ sdn_terminal: sdn_terminal.c
 # Install both applications
 install: sdn sdn_terminal
 	mkdir -p $(HOME)/.local/bin
+	rm -f $(HOME)/.local/bin/sdn $(HOME)/.local/bin/sdn_terminal
 	cp sdn $(HOME)/.local/bin/
 	cp sdn_terminal $(HOME)/.local/bin/
+	mkdir -p $(HOME)/.local/share/applications/
 	cp sdn.desktop $(HOME)/.local/share/applications/ || true
-	echo "Installed to $(HOME)/.local/bin"
+	@echo "Installed to $(HOME)/.local/bin"
+	@echo "Updating desktop database..."
+	@update-desktop-database -q $(HOME)/.local/share/applications || echo "Failed to update desktop database. Please run 'update-desktop-database ~/.local/share/applications' manually if the app doesn't appear."
 
 # Uninstall applications
 uninstall:

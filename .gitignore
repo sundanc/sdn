@@ -8,6 +8,9 @@ sdn_terminal
 # Dependency files
 *.d
 
+# Desktop files
+sdn.desktop
+
 # Editor/project files
 .vscode/
 *.swp
