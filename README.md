@@ -29,7 +29,7 @@ A custom terminal emulator with an integrated shell.
 - **Error Handling**: Informative messages for syntax and execution errors.
 - **Terminal Features**:
   - Copy/Paste with Ctrl+Shift+C and Ctrl+Shift+V
-  - Customizable colors
+  - Customizable colors via command-line themes (dark (default), light, light-blue, gray)
   - 10,000 lines of scrollback buffer
 
 ## Building and Installation
@@ -87,6 +87,9 @@ You can run the terminal emulator in several ways:
 2. If installed:
    ```bash
    sdn_terminal
+   # To use a specific theme, for example "light":
+   sdn_terminal --theme light
+   # Available themes: dark(default), light, light-blue, gray
    ```
 
 3. From your desktop environment's application menu (search for "SDN Terminal")

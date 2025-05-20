@@ -5,6 +5,7 @@
 #include <unistd.h>
 #include <libgen.h>
 #include <limits.h> // Add this line for PATH_MAX
+#include <glib.h> // For g_strcmp0
 
 #ifndef PATH_MAX
 #define PATH_MAX 4096
@@ -14,19 +15,46 @@
 #define DEFAULT_WIDTH 800
 #define DEFAULT_HEIGHT 500
 
-static gboolean on_key_press(GtkWidget *terminal, GdkEventKey *event, gpointer user_data);
+// Theme definitions
+typedef enum {
+    THEME_DARK,
+    THEME_LIGHT_BLUE,
+    THEME_LIGHT_MODE,
+    THEME_GRAY
+} TerminalTheme;
+
+static void apply_theme(VteTerminal *terminal, TerminalTheme theme);
+static gboolean on_key_press(GtkWidget *widget, GdkEventKey *event, gpointer user_data); // Changed GtkWidget *terminal to GtkWidget *widget
 static void on_child_exit(VteTerminal *terminal, gint status, gpointer user_data);
 static gchar* get_shell_path();
 static void spawn_callback(VteTerminal *terminal, GPid pid, GError *error, gpointer user_data);
 
 int main(int argc, char *argv[]) {
     GtkWidget *window, *terminal;
-    GdkRGBA foreground, background;
     char *shell_path;
     char **command;
+    TerminalTheme current_theme = THEME_DARK; // Default theme
 
-    // Initialize GTK
+    // Initialize GTK (should be called before any GTK functions)
     gtk_init(&argc, &argv);
+
+    // Parse command-line arguments for theme
+    for (int i = 1; i < argc; i++) {
+        if (g_strcmp0(argv[i], "--theme") == 0 && i + 1 < argc) {
+            i++; // Move to the theme name
+            if (g_strcmp0(argv[i], "light-blue") == 0) {
+                current_theme = THEME_LIGHT_BLUE;
+            } else if (g_strcmp0(argv[i], "light") == 0) {
+                current_theme = THEME_LIGHT_MODE;
+            } else if (g_strcmp0(argv[i], "gray") == 0) {
+                current_theme = THEME_GRAY;
+            } else if (g_strcmp0(argv[i], "dark") == 0) {
+                current_theme = THEME_DARK;
+            } else {
+                g_warning("Unknown theme: %s. Using default (dark).", argv[i]);
+            }
+        }
+    }
 
     // Create window
     window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
@@ -38,10 +66,8 @@ int main(int argc, char *argv[]) {
     terminal = vte_terminal_new();
     gtk_container_add(GTK_CONTAINER(window), terminal);
 
-    // Set terminal colors
-    gdk_rgba_parse(&foreground, "#FFFFFF");
-    gdk_rgba_parse(&background, "#1A1A1A");
-    vte_terminal_set_colors(VTE_TERMINAL(terminal), &foreground, &background, NULL, 0);
+    // Set terminal colors based on selected theme
+    apply_theme(VTE_TERMINAL(terminal), current_theme);
 
     // Set scrollback lines
     vte_terminal_set_scrollback_lines(VTE_TERMINAL(terminal), 10000);
@@ -53,7 +79,7 @@ int main(int argc, char *argv[]) {
     // Get the path to the sdn shell
     shell_path = get_shell_path();
     if (!shell_path) {
-        g_print("Could not find sdn shell executable.\n");
+        g_error("Could not find sdn shell executable.");
         return 1;
     }
 
@@ -62,18 +88,19 @@ int main(int argc, char *argv[]) {
 
     // Start shell in terminal using the non-deprecated spawn_async function
     vte_terminal_spawn_async(
-        VTE_TERMINAL(terminal),
-        VTE_PTY_DEFAULT,
-        NULL,                 // Working directory (NULL = current)
-        command,              // Command
-        NULL,                 // Environment
-        G_SPAWN_DEFAULT,      // Spawn flags
-        NULL, NULL,           // Child setup function, data
-        NULL,                 // Cancellable
-        -1,                   // Timeout (-1 = no timeout)
-        NULL,                 // Cancellable
-        spawn_callback,       // Callback
-        window                // User data passed to callback
+        VTE_TERMINAL(terminal),       // VteTerminal *terminal
+        VTE_PTY_DEFAULT,              // VtePtyFlags pty_flags
+        NULL,                         // const char *working_directory
+        command,                      // char **argv
+        NULL,                         // char **envv
+        G_SPAWN_DEFAULT,              // GSpawnFlags spawn_flags
+        NULL,                         // GSpawnChildSetupFunc child_setup
+        NULL,                         // gpointer child_setup_data
+        NULL,                         // GDestroyNotify child_setup_data_destroy
+        -1,                           // int timeout
+        NULL,                         // GCancellable *cancellable
+        (VteTerminalSpawnAsyncCallback)spawn_callback, // VteTerminalSpawnAsyncCallback callback
+        window                        // gpointer user_data
     );
 
     // Show everything
@@ -86,21 +113,47 @@ int main(int argc, char *argv[]) {
     return 0;
 }
 
+// Function to apply theme colors
+static void apply_theme(VteTerminal *terminal, TerminalTheme theme) {
+    GdkRGBA foreground_color, background_color;
+
+    switch (theme) {
+        case THEME_LIGHT_BLUE:
+            gdk_rgba_parse(&foreground_color, "#002B36"); // Dark blue/black for text
+            gdk_rgba_parse(&background_color, "#A6D1E6"); // Light blue
+            break;
+        case THEME_LIGHT_MODE:
+            gdk_rgba_parse(&foreground_color, "#657B83"); // Solarized dark gray for text
+            gdk_rgba_parse(&background_color, "#FDF6E3"); // Solarized light background
+            break;
+        case THEME_GRAY:
+            gdk_rgba_parse(&foreground_color, "#DCDCDC"); // Light gray for text
+            gdk_rgba_parse(&background_color, "#3C3C3C"); // Darker gray
+            break;
+        case THEME_DARK:
+        default:
+            gdk_rgba_parse(&foreground_color, "#FFFFFF"); // White text
+            gdk_rgba_parse(&background_color, "#1A1A1A"); // Original dark background
+            break;
+    }
+    vte_terminal_set_colors(terminal, &foreground_color, &background_color, NULL, 0);
+}
+
 // Handle keyboard shortcuts
-static gboolean on_key_press(GtkWidget *terminal, GdkEventKey *event, gpointer user_data) {
+static gboolean on_key_press(GtkWidget *widget, GdkEventKey *event, gpointer user_data) { // Changed GtkWidget *terminal to GtkWidget *widget
     (void)user_data; // Suppress unused parameter warning
+    VteTerminal *terminal = VTE_TERMINAL(widget); // Cast widget to VteTerminal
+
     // Ctrl+Shift+C - Copy
-    if ((event->state & (GDK_CONTROL_MASK | GDK_SHIFT_MASK)) == (GDK_CONTROL_MASK | GDK_SHIFT_MASK) && 
-        event->keyval == GDK_KEY_C) {
-        vte_terminal_copy_clipboard_format(VTE_TERMINAL(terminal), VTE_FORMAT_TEXT);
-        return TRUE;
+    if ((event->state & GDK_CONTROL_MASK) && (event->state & GDK_SHIFT_MASK) && event->keyval == GDK_KEY_C) {
+        vte_terminal_copy_clipboard_format(terminal, VTE_FORMAT_TEXT);
+        return TRUE; // Event handled
     }
     
     // Ctrl+Shift+V - Paste
-    if ((event->state & (GDK_CONTROL_MASK | GDK_SHIFT_MASK)) == (GDK_CONTROL_MASK | GDK_SHIFT_MASK) && 
-        event->keyval == GDK_KEY_V) {
-        vte_terminal_paste_clipboard(VTE_TERMINAL(terminal));
-        return TRUE;
+    if ((event->state & GDK_CONTROL_MASK) && (event->state & GDK_SHIFT_MASK) && event->keyval == GDK_KEY_V) {
+        vte_terminal_paste_clipboard(terminal);
+        return TRUE; // Event handled
     }
     
     // Let the terminal handle other keypresses
