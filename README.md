@@ -1,4 +1,6 @@
-# sdn terminal
+# SDN Terminal
+
+A custom terminal emulator with an integrated shell.
 
 ## Features
 
@@ -25,3 +27,93 @@
   - `history`: Show command history.
 - **Interactive Editing**: Backspace, arrow keys, and Ctrl+D for input control.
 - **Error Handling**: Informative messages for syntax and execution errors.
+- **Terminal Features**:
+  - Copy/Paste with Ctrl+Shift+C and Ctrl+Shift+V
+  - Customizable colors
+  - 10,000 lines of scrollback buffer
+
+## Building and Installation
+
+### Dependencies
+
+The terminal requires the following libraries:
+- GTK+ 3.0
+- VTE 2.91 (Virtual Terminal Emulator)
+
+On Ubuntu/Debian, install dependencies with:
+```bash
+sudo apt-get install libgtk-3-dev libvte-2.91-dev
+```
+
+On Fedora:
+```bash
+sudo dnf install gtk3-devel vte291-devel
+```
+
+On Arch Linux:
+```bash
+sudo pacman -S gtk3 vte3
+```
+
+### Building
+
+Use the included Makefile:
+
+```bash
+make
+```
+
+This builds both the `sdn` shell and the `sdn_terminal` application.
+
+### Installation
+
+To install the applications to your user directory:
+
+```bash
+make install
+```
+
+This installs to `~/.local/bin/` and adds a desktop entry.
+
+## Running
+
+You can run the terminal emulator in several ways:
+
+1. From the build directory:
+   ```bash
+   ./sdn_terminal
+   ```
+
+2. If installed:
+   ```bash
+   sdn_terminal
+   ```
+
+3. From your desktop environment's application menu (search for "SDN Terminal")
+
+## Using Just the Shell
+
+If you want to use the SDN shell without the terminal emulator:
+
+```bash
+./sdn
+```
+
+Or if installed:
+```bash
+sdn
+```
+
+## Uninstallation
+
+To uninstall:
+
+```bash
+make uninstall
+```
+
+## Keyboard Shortcuts
+
+- `Ctrl+Shift+C`: Copy selected text
+- `Ctrl+Shift+V`: Paste from clipboard
+- `Ctrl+D`: Exit the shell

@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=SDN Terminal
+Comment=Terminal emulator with SDN shell
+Exec=sdn_terminal
+Icon=utilities-terminal
+Terminal=false
+Type=Application
+Categories=System;TerminalEmulator;
+Keywords=shell;prompt;command;commandline;
+StartupNotify=true

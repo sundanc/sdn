@@ -1,0 +1,21 @@
+# Build artifacts
+sdn
+sdn_terminal
+
+# Object files
+*.o
+
+# Dependency files
+*.d
+
+# Editor/project files
+.vscode/
+*.swp
+*~
+
+# History and local alias files
+.sdn_history
+.sdn_local_aliases
+
+# Other
+*.log
