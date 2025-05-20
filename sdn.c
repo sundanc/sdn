@@ -211,45 +211,33 @@ void handle_alias_builtin(char **args) {
     char *first_arg_equals_ptr = strchr(args[1], '=');
 
     if (first_arg_equals_ptr != NULL) {
-        // This is an assignment: name=value
-        // The value might be split across args if it contained spaces and was quoted,
-        // because the main parser tokenizes by space.
-        // Reconstruct the full "name=value" string from args[1], args[2], ...
         strncpy(reconstructed_assignment, args[1], sizeof(reconstructed_assignment) - 1);
         reconstructed_assignment[sizeof(reconstructed_assignment) - 1] = '\0';
 
         for (int i = 2; args[i] != NULL; i++) {
             size_t current_len = strlen(reconstructed_assignment);
-            // Check if there's space to add a ' ' character
             if (current_len < sizeof(reconstructed_assignment) - 1) {
                 reconstructed_assignment[current_len++] = ' '; // Add space separator
                 reconstructed_assignment[current_len] = '\0';   // Null-terminate for strncat
             } else {
-                // No space for even a space character, so break
                 fprintf(stderr, "sdn: alias: command too long after reconstructing arguments\n");
                 break; 
             }
 
-            // current_len has been updated after adding space (or loop broken)
-            // Check if there's space for the next argument part
             if (current_len < sizeof(reconstructed_assignment) - 1) {
                  strncat(reconstructed_assignment, args[i], sizeof(reconstructed_assignment) - 1 - current_len);
             } else {
-                // This case should ideally not be reached if the above check is robust,
-                // but as a safeguard if only space for null terminator was left.
                 fprintf(stderr, "sdn: alias: command too long, cannot append further arguments\n");
                 break; 
             }
         }
-        // Now reconstructed_assignment contains the full assignment string like "name=value" or "name="value with spaces""
         
         char alias_name[MAX_ALIAS_NAME_LEN];
         char alias_value[MAX_ALIAS_COMMAND_LEN];
         
-        // Find '=' in the fully reconstructed string
         char *equals_ptr = strchr(reconstructed_assignment, '='); 
         
-        if (equals_ptr == NULL) { // Should not happen if first_arg_equals_ptr was not NULL and reconstruction didn't fail badly
+        if (equals_ptr == NULL) { 
             fprintf(stderr, "sdn: alias: internal error parsing assignment\n");
             return;
         }
@@ -267,7 +255,6 @@ void handle_alias_builtin(char **args) {
         alias_value[MAX_ALIAS_COMMAND_LEN - 1] = '\0';
 
         size_t val_len = strlen(alias_value);
-        // Ensure val_len >= 2 for quote stripping to be possible
         if (val_len >= 2 && 
             ((alias_value[0] == '"' && alias_value[val_len-1] == '"') ||
              (alias_value[0] == '\'' && alias_value[val_len-1] == '\''))) {
@@ -278,12 +265,10 @@ void handle_alias_builtin(char **args) {
         add_or_update_alias(alias_name, alias_value);
 
     } else {
-        // No '=' in args[1], so it's `alias name` (to display one) or an error
-        if (args[2] != NULL) { // e.g. alias foo bar - not a valid format for displaying one alias
+        if (args[2] != NULL) { 
             fprintf(stderr, "sdn: alias: usage: alias [name[=value] ...]\n");
             return;
         }
-        // Display specific alias
         const char *cmd = find_alias_command(args[1]);
         if (cmd) {
             printf("%s='%s'\n", args[1], cmd);
@@ -481,6 +466,16 @@ char *find_common_prefix(FileMatches *matches) {
     return common;
 }
 
+void get_prompt(char *prompt_buffer, size_t buffer_size) {
+    char cwd[FILENAME_MAX];
+    if (getcwd(cwd, sizeof(cwd)) != NULL) {
+        snprintf(prompt_buffer, buffer_size, "%s> ", cwd);
+    } else {
+        strncpy(prompt_buffer, "sdn> ", buffer_size);
+        prompt_buffer[buffer_size - 1] = '\0';
+    }
+}
+
 int read_line_with_completion(char *buffer, int max_size, HistoryCache *cache) {
     int c;
     int position = 0;
@@ -488,6 +483,8 @@ int read_line_with_completion(char *buffer, int max_size, HistoryCache *cache) {
     int history_nav_idx = cache->count; // Current position in history navigation
     FileMatches file_matches;
     init_file_matches(&file_matches);
+    char prompt[FILENAME_MAX + 3]; 
+    get_prompt(prompt, sizeof(prompt));
 
     memset(buffer, 0, max_size);
     enable_raw_mode();
@@ -505,7 +502,7 @@ int read_line_with_completion(char *buffer, int max_size, HistoryCache *cache) {
                         buffer[max_size-1] = '\0';
                         position = strlen(buffer);
                         printf("\033[2K\r"); 
-                        printf("sdn> %s", buffer);
+                        printf("%s%s", prompt, buffer);
                         suggestion[0] = '\0'; 
                     }
                     break;
@@ -520,7 +517,7 @@ int read_line_with_completion(char *buffer, int max_size, HistoryCache *cache) {
                         }
                         position = strlen(buffer);
                         printf("\033[2K\r"); 
-                        printf("sdn> %s", buffer);
+                        printf("%s%s", prompt, buffer);
                         suggestion[0] = '\0'; 
                     }
                     break;
@@ -536,7 +533,7 @@ int read_line_with_completion(char *buffer, int max_size, HistoryCache *cache) {
                 history_nav_idx = cache->count; // Editing, so reset history navigation
 
                 printf("\033[2K\r"); 
-                printf("sdn> %s", buffer);
+                printf("%s%s", prompt, buffer);
                 
                 suggestion[0] = '\0'; // Clear previous suggestion first
                 char *match = find_matching_command(buffer, cache);
@@ -559,7 +556,7 @@ int read_line_with_completion(char *buffer, int max_size, HistoryCache *cache) {
                 }
                 
                 printf("\033[2K\r"); 
-                printf("sdn> %s", buffer);
+                printf("%s%s", prompt, buffer);
                 suggestion[0] = '\0';
                 history_nav_idx = cache->count;
             } else {
@@ -587,7 +584,7 @@ int read_line_with_completion(char *buffer, int max_size, HistoryCache *cache) {
                             position += completion_len;
                             
                             printf("\033[2K\r");
-                            printf("sdn> %s", buffer);
+                            printf("%s%s", prompt, buffer);
                         }
                     } else if (file_matches.count > 1) {
                         // Multiple matches - find common prefix and show options
@@ -618,7 +615,7 @@ int read_line_with_completion(char *buffer, int max_size, HistoryCache *cache) {
                         if (file_matches.count % 4 != 0) printf("\n");
                         
                         // Redraw the prompt and buffer
-                        printf("sdn> %s", buffer);
+                        printf("%s%s", prompt, buffer);
                         
                         free(common);
                     }
@@ -637,7 +634,7 @@ int read_line_with_completion(char *buffer, int max_size, HistoryCache *cache) {
                 history_nav_idx = cache->count; // Editing, so reset history navigation
                 
                 printf("\033[2K\r"); // Clear entire line, cursor to beginning
-                printf("sdn> %s", buffer); // Print prompt and updated buffer
+                printf("%s%s", prompt, buffer); // Print prompt and updated buffer
                 
                 suggestion[0] = '\0'; // Clear previous suggestion
                 char *match = find_matching_command(buffer, cache);
@@ -970,7 +967,9 @@ int main(void) {
             printf("Shell: Background process with PID %d terminated.\n", wpid);
         }
 
-        printf("sdn> ");
+        char prompt[FILENAME_MAX + 3];
+        get_prompt(prompt, sizeof(prompt));
+        printf("%s", prompt);
         fflush(stdout);
 
         int result = read_line_with_completion(input_line_raw, sizeof(input_line_raw), &history_cache);
