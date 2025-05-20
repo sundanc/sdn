@@ -12,6 +12,7 @@
 #define MAX_ARGS 20 
 #define HISTORY_FILE_NAME ".sdn_history"
 #define MAX_HISTORY_ENTRIES 1000
+#define MAX_COMMAND_SEGMENTS 10 
 
 #define ANSI_COLOR_GRAY "\033[90m"
 #define ANSI_COLOR_RESET "\033[0m"
@@ -22,6 +23,14 @@ typedef struct {
     char *commands[MAX_HISTORY_ENTRIES];
     int count;
 } HistoryCache;
+
+typedef struct {
+    char *args[MAX_ARGS];
+    char *inputFile;
+    char *outputFile;
+    int appendMode;
+} CommandSegment;
+
 
 void get_history_file_path(char *path_buffer, size_t buffer_size);
 
@@ -253,18 +262,15 @@ void display_history() {
     }
 }
 
-int parse_command(char *input_line, char **args, 
-                  char **inputFile, char **outputFile, int *is_append) {
+int parse_single_command_segment(char *segment_str, CommandSegment *cmd_segment) {
     int argc = 0;
-    int background = 0;
+    cmd_segment->inputFile = NULL;
+    cmd_segment->outputFile = NULL;
+    cmd_segment->appendMode = 0;
     
-    *inputFile = NULL;
-    *outputFile = NULL;
-    *is_append = 0;
-
     char *temp_tokens[MAX_ARGS];
     int token_count = 0;
-    char *token = strtok(input_line, " \n\t\r");
+    char *token = strtok(segment_str, " \n\t\r");
     while (token != NULL && token_count < MAX_ARGS - 1) {
         temp_tokens[token_count++] = token;
         token = strtok(NULL, " \n\t\r");
@@ -272,66 +278,158 @@ int parse_command(char *input_line, char **args,
     temp_tokens[token_count] = NULL;
 
     if (token_count == 0) {
-        args[0] = NULL;
+        cmd_segment->args[0] = NULL;
         return 0; 
     }
-
-    if (token_count > 0 && strcmp(temp_tokens[token_count - 1], "&") == 0) {
-        background = 1;
-        temp_tokens[token_count - 1] = NULL; 
-        token_count--; 
-    }
-
+    
     for (int i = 0; i < token_count; ) {
         if (strcmp(temp_tokens[i], "<") == 0) {
             if (i + 1 < token_count) {
-                *inputFile = temp_tokens[i + 1];
+                cmd_segment->inputFile = temp_tokens[i + 1];
                 i += 2; 
             } else {
                 fprintf(stderr, "sdn: syntax error near `<'\n");
-                args[0] = NULL; return -1; 
+                cmd_segment->args[0] = NULL; return -1; 
             }
         } else if (strcmp(temp_tokens[i], ">") == 0) {
             if (i + 1 < token_count) {
-                *outputFile = temp_tokens[i + 1];
-                *is_append = 0;
+                cmd_segment->outputFile = temp_tokens[i + 1];
+                cmd_segment->appendMode = 0;
                 i += 2; 
             } else {
                 fprintf(stderr, "sdn: syntax error near `>'\n");
-                args[0] = NULL; return -1; 
+                cmd_segment->args[0] = NULL; return -1; 
             }
         } else if (strcmp(temp_tokens[i], ">>") == 0) {
             if (i + 1 < token_count) {
-                *outputFile = temp_tokens[i + 1];
-                *is_append = 1;
+                cmd_segment->outputFile = temp_tokens[i + 1];
+                cmd_segment->appendMode = 1;
                 i += 2; 
             } else {
                 fprintf(stderr, "sdn: syntax error near `>>'\n");
-                args[0] = NULL; return -1; 
+                cmd_segment->args[0] = NULL; return -1; 
             }
         } else {
             if (argc < MAX_ARGS - 1) {
-                args[argc++] = temp_tokens[i];
+                cmd_segment->args[argc++] = temp_tokens[i];
             }
             i++;
         }
     }
-    args[argc] = NULL;
-    
-    return background;
+    cmd_segment->args[argc] = NULL;
+    return 0;
 }
 
-int main(void) {
-    char input[MAX_LINE];
-    char history_entry_buffer[MAX_LINE];
-    char *args[MAX_ARGS];
-    pid_t pid, wpid; 
+
+void execute_pipeline(CommandSegment segments[], int num_segments, int background) {
+    int pipe_fds[2];
+    int prev_pipe_read_end = STDIN_FILENO;
+    pid_t pids[MAX_COMMAND_SEGMENTS];
     int status;
-    int background;
+
+    for (int i = 0; i < num_segments; i++) {
+        if (i < num_segments - 1) {
+            if (pipe(pipe_fds) == -1) {
+                perror("sdn: pipe");
+                exit(EXIT_FAILURE);
+            }
+        }
+
+        pids[i] = fork();
+        if (pids[i] < 0) {
+            perror("sdn: fork");
+            exit(EXIT_FAILURE);
+        }
+
+        if (pids[i] == 0) { // Child process
+            if (prev_pipe_read_end != STDIN_FILENO) {
+                if (dup2(prev_pipe_read_end, STDIN_FILENO) == -1) {
+                    perror("sdn: dup2 stdin");
+                    exit(EXIT_FAILURE);
+                }
+                close(prev_pipe_read_end);
+            }
+
+            if (i < num_segments - 1) {
+                close(pipe_fds[0]); // Close read end in child
+                if (dup2(pipe_fds[1], STDOUT_FILENO) == -1) {
+                    perror("sdn: dup2 stdout");
+                    exit(EXIT_FAILURE);
+                }
+                close(pipe_fds[1]);
+            }
+
+            if (segments[i].inputFile) {
+                int fd_in = open(segments[i].inputFile, O_RDONLY);
+                if (fd_in == -1) {
+                    perror("sdn: open input file");
+                    exit(EXIT_FAILURE);
+                }
+                if (dup2(fd_in, STDIN_FILENO) == -1) {
+                    perror("sdn: dup2 input file");
+                    exit(EXIT_FAILURE);
+                }
+                close(fd_in);
+            }
+
+            if (segments[i].outputFile) {
+                int flags = O_WRONLY | O_CREAT;
+                if (segments[i].appendMode) {
+                    flags |= O_APPEND;
+                } else {
+                    flags |= O_TRUNC;
+                }
+                int fd_out = open(segments[i].outputFile, flags, 0644);
+                if (fd_out == -1) {
+                    perror("sdn: open output file");
+                    exit(EXIT_FAILURE);
+                }
+                if (dup2(fd_out, STDOUT_FILENO) == -1) {
+                    perror("sdn: dup2 output file");
+                    exit(EXIT_FAILURE);
+                }
+                close(fd_out);
+            }
+            
+            if (execvp(segments[i].args[0], segments[i].args) == -1) {
+                perror("sdn: execvp failed");
+                exit(EXIT_FAILURE);
+            }
+        } else { // Parent process
+            if (prev_pipe_read_end != STDIN_FILENO) {
+                close(prev_pipe_read_end);
+            }
+            if (i < num_segments - 1) {
+                close(pipe_fds[1]); // Close write end in parent
+                prev_pipe_read_end = pipe_fds[0];
+            }
+        }
+    }
+
+    if (!background) {
+        for (int i = 0; i < num_segments; i++) {
+            waitpid(pids[i], &status, 0);
+        }
+    } else {
+        for (int i = 0; i < num_segments; i++) {
+             printf("[%d] ", pids[i]);
+        }
+        printf("\n");
+    }
+}
+
+
+int main(void) {
+    char input_line_raw[MAX_LINE];
+    char input_line_for_parsing[MAX_LINE];
+    char history_entry_buffer[MAX_LINE];
     
-    char *inputFile = NULL;
-    char *outputFile = NULL;
-    int appendMode = 0;
+    pid_t wpid; 
+    int status;
+    int overall_background; 
+    
+    CommandSegment command_segments[MAX_COMMAND_SEGMENTS];
+    int num_segments;
     
     HistoryCache history_cache = {0};
     load_history_cache(&history_cache);
@@ -345,17 +443,17 @@ int main(void) {
         printf("sdn> ");
         fflush(stdout);
 
-        int result = read_line_with_completion(input, sizeof(input), &history_cache);
+        int result = read_line_with_completion(input_line_raw, sizeof(input_line_raw), &history_cache);
         
         if (result == -1) {
             printf("\nExiting sdn.\n");
             break;
         }
         
-        strncpy(history_entry_buffer, input, MAX_LINE - 1);
+        strncpy(history_entry_buffer, input_line_raw, MAX_LINE - 1);
         history_entry_buffer[MAX_LINE - 1] = '\0';
 
-        if (strlen(input) == 0) {
+        if (strlen(input_line_raw) == 0) {
             continue;
         }
 
@@ -376,32 +474,57 @@ int main(void) {
             }
         }
         
-        if (strcmp(input, "exit") == 0) {
+        strcpy(input_line_for_parsing, input_line_raw);
+
+        overall_background = 0;
+        int len = strlen(input_line_for_parsing);
+        if (len > 0 && input_line_for_parsing[len-1] == '&') {
+            overall_background = 1;
+            input_line_for_parsing[len-1] = '\0'; 
+            if (len > 1 && input_line_for_parsing[len-2] == ' ') {
+                 input_line_for_parsing[len-2] = '\0';
+            }
+        }
+        
+        if (strcmp(input_line_for_parsing, "exit") == 0) {
             while ((wpid = waitpid(-1, &status, WNOHANG)) > 0) {
                 printf("Shell: Background process with PID %d terminated before exit.\n", wpid);
             }
             printf("Exiting sdn.\n");
             break;
         }
+        
+        num_segments = 0;
+        char *saveptr_pipe;
+        char *command_str = strtok_r(input_line_for_parsing, "|", &saveptr_pipe);
+        while(command_str != NULL && num_segments < MAX_COMMAND_SEGMENTS) {
+            char temp_cmd_str[MAX_LINE];
+            strncpy(temp_cmd_str, command_str, MAX_LINE-1);
+            temp_cmd_str[MAX_LINE-1] = '\0';
 
-        background = parse_command(input, args, &inputFile, &outputFile, &appendMode);
+            if (parse_single_command_segment(temp_cmd_str, &command_segments[num_segments]) == -1) {
+                num_segments = -1; // Indicate parsing error
+                break;
+            }
+            if (command_segments[num_segments].args[0] == NULL && command_segments[num_segments].inputFile == NULL && command_segments[num_segments].outputFile == NULL) {
+                // Empty segment, likely due to "||" or trailing/leading "|"
+                if (num_segments > 0 || strtok_r(NULL, "|", &saveptr_pipe) != NULL) { // only error if not the only segment or more segments follow
+                     fprintf(stderr, "sdn: syntax error near `|'\n");
+                     num_segments = -1;
+                     break;
+                }
+            } else {
+                 num_segments++;
+            }
+            command_str = strtok_r(NULL, "|", &saveptr_pipe);
+        }
 
-        if (background == -1) { 
+        if (num_segments == -1 || num_segments == 0) {
             continue;
         }
         
-        if (args[0] == NULL) {
-            if (inputFile || outputFile) {
-                 fprintf(stderr, "sdn: missing command for redirection\n");
-            }
-            continue; 
-        }
-        
-        if (strcmp(args[0], "cd") == 0) {
-            if (args[1] == NULL) {
-                
-                
-                
+        if (num_segments == 1 && command_segments[0].args[0] != NULL && strcmp(command_segments[0].args[0], "cd") == 0) {
+            if (command_segments[0].args[1] == NULL) {
                 char *home_dir = getenv("HOME");
                 if (home_dir) {
                     if (chdir(home_dir) != 0) {
@@ -411,65 +534,17 @@ int main(void) {
                     fprintf(stderr, "sdn: cd: HOME not set\n");
                 }
             } else {
-                if (chdir(args[1]) != 0) {
+                if (chdir(command_segments[0].args[1]) != 0) {
                     perror("sdn: cd failed");
                 }
             }
             continue; 
-        } else if (strcmp(args[0], "history") == 0) {
+        } else if (num_segments == 1 && command_segments[0].args[0] != NULL && strcmp(command_segments[0].args[0], "history") == 0) {
             display_history();
             continue;
         }
 
-        pid = fork();
-
-        if (pid < 0) {
-            perror("fork failed");
-            exit(EXIT_FAILURE);
-        } else if (pid == 0) {
-            if (inputFile) {
-                int fd_in = open(inputFile, O_RDONLY);
-                if (fd_in == -1) {
-                    perror("sdn: open input file");
-                    exit(EXIT_FAILURE);
-                }
-                if (dup2(fd_in, STDIN_FILENO) == -1) {
-                    perror("sdn: dup2 input");
-                    exit(EXIT_FAILURE);
-                }
-                close(fd_in);
-            }
-
-            if (outputFile) {
-                int flags = O_WRONLY | O_CREAT;
-                if (appendMode) {
-                    flags |= O_APPEND;
-                } else {
-                    flags |= O_TRUNC;
-                }
-                int fd_out = open(outputFile, flags, 0644);
-                if (fd_out == -1) {
-                    perror("sdn: open output file");
-                    exit(EXIT_FAILURE);
-                }
-                if (dup2(fd_out, STDOUT_FILENO) == -1) {
-                    perror("sdn: dup2 output");
-                    exit(EXIT_FAILURE);
-                }
-                close(fd_out);
-            }
-            
-            if (execvp(args[0], args) == -1) {
-                perror("sdn: execvp failed");
-                exit(EXIT_FAILURE); 
-            }
-        } else {
-            if (background) {
-                printf("[%d] %s &\n", pid, args[0]); 
-            } else {
-                waitpid(pid, &status, 0);
-            }
-        }
+        execute_pipeline(command_segments, num_segments, overall_background);
     }
 
     free_history_cache(&history_cache);
