@@ -98,69 +98,95 @@ int read_line_with_completion(char *buffer, int max_size, HistoryCache *cache) {
     int c;
     int position = 0;
     char suggestion[MAX_LINE] = {0};
-    
-    // Clear the buffer
+    int history_nav_idx = cache->count; // Current position in history navigation
+
     memset(buffer, 0, max_size);
-    
     enable_raw_mode();
     
     while (1) {
         c = getchar();
         
-        // Handle special keys
-        if (c == '\n' || c == '\r') {
-            // Return key pressed
+        if (c == '\033') { // Escape sequence
+            getchar(); // Skip '['
+            switch(getchar()) {
+                case 'A': // Up arrow
+                    if (cache->count > 0 && history_nav_idx > 0) {
+                        history_nav_idx--;
+                        strncpy(buffer, cache->commands[history_nav_idx], max_size -1);
+                        buffer[max_size-1] = '\0';
+                        position = strlen(buffer);
+                        printf("\033[2K\r"); 
+                        printf("sdn> %s", buffer);
+                        suggestion[0] = '\0'; 
+                    }
+                    break;
+                case 'B': // Down arrow
+                    if (cache->count > 0 && history_nav_idx < cache->count) {
+                        history_nav_idx++;
+                        if (history_nav_idx < cache->count) {
+                            strncpy(buffer, cache->commands[history_nav_idx], max_size -1);
+                            buffer[max_size-1] = '\0';
+                        } else { // Moved past the last history item to a new line
+                            buffer[0] = '\0';
+                        }
+                        position = strlen(buffer);
+                        printf("\033[2K\r"); 
+                        printf("sdn> %s", buffer);
+                        suggestion[0] = '\0'; 
+                    }
+                    break;
+            }
+        } else if (c == '\n' || c == '\r') {
             printf("\n");
             break;
         } else if (c == 127 || c == '\b') {
-            // Backspace key
             if (position > 0) {
                 position--;
                 buffer[position] = '\0';
-                
-                printf("\033[2K\r"); // Clear the line
+                history_nav_idx = cache->count; // Editing, so reset history navigation
+
+                printf("\033[2K\r"); 
                 printf("sdn> %s", buffer);
                 
-                // Find new suggestion
                 char *match = find_matching_command(buffer, cache);
-                if (match) {
-                    strcpy(suggestion, match + position);
+                if (match && strlen(buffer) > 0) { // Only suggest if buffer is not empty
+                    strncpy(suggestion, match + position, MAX_LINE -1);
+                    suggestion[MAX_LINE-1] = '\0';
                     printf("%s%s%s", ANSI_COLOR_GRAY, suggestion, ANSI_COLOR_RESET);
-                    printf("\033[%dD", (int)strlen(suggestion)); // Move cursor back
+                    printf("\033[%dD", (int)strlen(suggestion)); 
                 } else {
                     suggestion[0] = '\0';
                 }
             }
         } else if (c == '\t') {
-            // Tab key - complete with suggestion
             if (suggestion[0] != '\0') {
-                strcat(buffer, suggestion);
-                position += strlen(suggestion);
+                if (position + strlen(suggestion) < max_size -1) {
+                    strcat(buffer, suggestion);
+                    position += strlen(suggestion);
+                }
                 
-                // Clear line and reprint
-                printf("\033[2K\r"); // Clear the line
+                printf("\033[2K\r"); 
                 printf("sdn> %s", buffer);
                 suggestion[0] = '\0';
+                history_nav_idx = cache->count; // Editing, so reset history navigation
             }
         } else if (c == 4) {
-            // Ctrl+D (EOF)
             disable_raw_mode();
             return -1;
         } else if (isprint(c)) {
-            // Regular character
             if (position < max_size - 1) {
                 buffer[position++] = c;
                 buffer[position] = '\0';
+                history_nav_idx = cache->count; // Editing, so reset history navigation
                 
-                // Print the character
                 printf("%c", c);
                 
-                // Find suggestion
                 char *match = find_matching_command(buffer, cache);
                 if (match) {
-                    strcpy(suggestion, match + position);
+                    strncpy(suggestion, match + position, MAX_LINE -1);
+                    suggestion[MAX_LINE-1] = '\0';
                     printf("%s%s%s", ANSI_COLOR_GRAY, suggestion, ANSI_COLOR_RESET);
-                    printf("\033[%dD", (int)strlen(suggestion)); // Move cursor back
+                    printf("\033[%dD", (int)strlen(suggestion)); 
                 } else {
                     suggestion[0] = '\0';
                 }
