@@ -19,6 +19,7 @@
 #define MAX_ALIASES 50
 #define MAX_ALIAS_NAME_LEN 50
 #define MAX_ALIAS_COMMAND_LEN MAX_LINE
+#define LOCAL_ALIASES_FILENAME ".sdn_local_aliases"
 
 #define ANSI_COLOR_GRAY "\033[90m"
 #define ANSI_COLOR_RESET "\033[0m"
@@ -44,6 +45,9 @@ typedef struct {
 
 AliasEntry alias_table[MAX_ALIASES];
 int alias_count = 0;
+
+AliasEntry local_alias_table[MAX_ALIASES];
+int local_alias_count = 0;
 
 // Helper structure to store matching files
 typedef struct {
@@ -124,6 +128,13 @@ void free_history_cache(HistoryCache *cache) {
 }
 
 const char *find_alias_command(const char *name) {
+    // Check local aliases first
+    for (int i = 0; i < local_alias_count; i++) {
+        if (strcmp(local_alias_table[i].name, name) == 0) {
+            return local_alias_table[i].command;
+        }
+    }
+    // Then check global aliases
     for (int i = 0; i < alias_count; i++) {
         if (strcmp(alias_table[i].name, name) == 0) {
             return alias_table[i].command;
@@ -132,27 +143,31 @@ const char *find_alias_command(const char *name) {
     return NULL;
 }
 
-void add_or_update_alias(const char *name, const char *command) {
+void add_alias_to_table(AliasEntry table[], int *count, const char *name, const char *command, int max_aliases) {
     if (strlen(name) >= MAX_ALIAS_NAME_LEN || strlen(command) >= MAX_ALIAS_COMMAND_LEN) {
         fprintf(stderr, "sdn: alias name or command too long\n");
         return;
     }
-    for (int i = 0; i < alias_count; i++) {
-        if (strcmp(alias_table[i].name, name) == 0) {
-            strncpy(alias_table[i].command, command, MAX_ALIAS_COMMAND_LEN -1);
-            alias_table[i].command[MAX_ALIAS_COMMAND_LEN -1] = '\0';
+    for (int i = 0; i < *count; i++) {
+        if (strcmp(table[i].name, name) == 0) {
+            strncpy(table[i].command, command, MAX_ALIAS_COMMAND_LEN -1);
+            table[i].command[MAX_ALIAS_COMMAND_LEN -1] = '\0';
             return;
         }
     }
-    if (alias_count < MAX_ALIASES) {
-        strncpy(alias_table[alias_count].name, name, MAX_ALIAS_NAME_LEN - 1);
-        alias_table[alias_count].name[MAX_ALIAS_NAME_LEN - 1] = '\0';
-        strncpy(alias_table[alias_count].command, command, MAX_ALIAS_COMMAND_LEN - 1);
-        alias_table[alias_count].command[MAX_ALIAS_COMMAND_LEN - 1] = '\0';
-        alias_count++;
+    if (*count < max_aliases) {
+        strncpy(table[*count].name, name, MAX_ALIAS_NAME_LEN - 1);
+        table[*count].name[MAX_ALIAS_NAME_LEN - 1] = '\0';
+        strncpy(table[*count].command, command, MAX_ALIAS_COMMAND_LEN - 1);
+        table[*count].command[MAX_ALIAS_COMMAND_LEN - 1] = '\0';
+        (*count)++;
     } else {
         fprintf(stderr, "sdn: alias table full\n");
     }
+}
+
+void add_or_update_alias(const char *name, const char *command) {
+    add_alias_to_table(alias_table, &alias_count, name, command, MAX_ALIASES);
 }
 
 void remove_alias(const char *name) {
@@ -174,8 +189,15 @@ void remove_alias(const char *name) {
 }
 
 void print_all_aliases() {
+    printf("Global Aliases:\n");
     for (int i = 0; i < alias_count; i++) {
-        printf("%s='%s'\n", alias_table[i].name, alias_table[i].command);
+        printf("  %s='%s'\n", alias_table[i].name, alias_table[i].command);
+    }
+    if (local_alias_count > 0) {
+        printf("Local Aliases (current directory):\n");
+        for (int i = 0; i < local_alias_count; i++) {
+            printf("  %s='%s'\n", local_alias_table[i].name, local_alias_table[i].command);
+        }
     }
 }
 
@@ -185,17 +207,59 @@ void handle_alias_builtin(char **args) {
         return;
     }
 
-    char *equals_ptr = strchr(args[1], '=');
-    if (equals_ptr != NULL) {
+    char reconstructed_assignment[MAX_LINE]; // Buffer for "name=value"
+    char *first_arg_equals_ptr = strchr(args[1], '=');
+
+    if (first_arg_equals_ptr != NULL) {
+        // This is an assignment: name=value
+        // The value might be split across args if it contained spaces and was quoted,
+        // because the main parser tokenizes by space.
+        // Reconstruct the full "name=value" string from args[1], args[2], ...
+        strncpy(reconstructed_assignment, args[1], sizeof(reconstructed_assignment) - 1);
+        reconstructed_assignment[sizeof(reconstructed_assignment) - 1] = '\0';
+
+        for (int i = 2; args[i] != NULL; i++) {
+            size_t current_len = strlen(reconstructed_assignment);
+            // Check if there's space to add a ' ' character
+            if (current_len < sizeof(reconstructed_assignment) - 1) {
+                reconstructed_assignment[current_len++] = ' '; // Add space separator
+                reconstructed_assignment[current_len] = '\0';   // Null-terminate for strncat
+            } else {
+                // No space for even a space character, so break
+                fprintf(stderr, "sdn: alias: command too long after reconstructing arguments\n");
+                break; 
+            }
+
+            // current_len has been updated after adding space (or loop broken)
+            // Check if there's space for the next argument part
+            if (current_len < sizeof(reconstructed_assignment) - 1) {
+                 strncat(reconstructed_assignment, args[i], sizeof(reconstructed_assignment) - 1 - current_len);
+            } else {
+                // This case should ideally not be reached if the above check is robust,
+                // but as a safeguard if only space for null terminator was left.
+                fprintf(stderr, "sdn: alias: command too long, cannot append further arguments\n");
+                break; 
+            }
+        }
+        // Now reconstructed_assignment contains the full assignment string like "name=value" or "name="value with spaces""
+        
         char alias_name[MAX_ALIAS_NAME_LEN];
         char alias_value[MAX_ALIAS_COMMAND_LEN];
+        
+        // Find '=' in the fully reconstructed string
+        char *equals_ptr = strchr(reconstructed_assignment, '='); 
+        
+        if (equals_ptr == NULL) { // Should not happen if first_arg_equals_ptr was not NULL and reconstruction didn't fail badly
+            fprintf(stderr, "sdn: alias: internal error parsing assignment\n");
+            return;
+        }
 
-        size_t name_len = equals_ptr - args[1];
+        size_t name_len = equals_ptr - reconstructed_assignment;
         if (name_len == 0 || name_len >= MAX_ALIAS_NAME_LEN) {
             fprintf(stderr, "sdn: alias: invalid alias name\n");
             return;
         }
-        strncpy(alias_name, args[1], name_len);
+        strncpy(alias_name, reconstructed_assignment, name_len);
         alias_name[name_len] = '\0';
 
         char *value_start = equals_ptr + 1;
@@ -203,18 +267,23 @@ void handle_alias_builtin(char **args) {
         alias_value[MAX_ALIAS_COMMAND_LEN - 1] = '\0';
 
         size_t val_len = strlen(alias_value);
-        if ((alias_value[0] == '"' && alias_value[val_len-1] == '"') ||
-            (alias_value[0] == '\'' && alias_value[val_len-1] == '\'')) {
+        // Ensure val_len >= 2 for quote stripping to be possible
+        if (val_len >= 2 && 
+            ((alias_value[0] == '"' && alias_value[val_len-1] == '"') ||
+             (alias_value[0] == '\'' && alias_value[val_len-1] == '\''))) {
             memmove(alias_value, alias_value + 1, val_len - 2);
             alias_value[val_len - 2] = '\0';
         }
         
         add_or_update_alias(alias_name, alias_value);
+
     } else {
-        if (args[2] != NULL) {
+        // No '=' in args[1], so it's `alias name` (to display one) or an error
+        if (args[2] != NULL) { // e.g. alias foo bar - not a valid format for displaying one alias
             fprintf(stderr, "sdn: alias: usage: alias [name[=value] ...]\n");
             return;
         }
+        // Display specific alias
         const char *cmd = find_alias_command(args[1]);
         if (cmd) {
             printf("%s='%s'\n", args[1], cmd);
@@ -232,6 +301,55 @@ void handle_unalias_builtin(char **args) {
     for (int i = 1; args[i] != NULL; i++) {
         remove_alias(args[i]);
     }
+}
+
+void clear_local_aliases() {
+    // For simplicity, we just reset the count.
+    // A more robust implementation would free strduped names/commands if they were dynamically allocated per entry.
+    // Since we use fixed-size arrays and strncpy, this is okay for now.
+    local_alias_count = 0;
+    // If AliasEntry members were char*, you'd loop and free them here.
+}
+
+void load_local_aliases(const char *current_dir_path) {
+    char local_alias_file_path[FILENAME_MAX];
+    snprintf(local_alias_file_path, sizeof(local_alias_file_path), "%s/%s", current_dir_path, LOCAL_ALIASES_FILENAME);
+
+    FILE *fp = fopen(local_alias_file_path, "r");
+    if (!fp) {
+        return; // No local alias file, or not readable
+    }
+
+    char line[MAX_LINE];
+    while (fgets(line, sizeof(line), fp)) {
+        line[strcspn(line, "\n")] = 0; // Remove newline
+
+        char *equals_ptr = strchr(line, '=');
+        if (equals_ptr != NULL) {
+            char alias_name[MAX_ALIAS_NAME_LEN];
+            char alias_value[MAX_ALIAS_COMMAND_LEN];
+
+            size_t name_len = equals_ptr - line;
+            if (name_len > 0 && name_len < MAX_ALIAS_NAME_LEN) {
+                strncpy(alias_name, line, name_len);
+                alias_name[name_len] = '\0';
+
+                char *value_start = equals_ptr + 1;
+                strncpy(alias_value, value_start, MAX_ALIAS_COMMAND_LEN - 1);
+                alias_value[MAX_ALIAS_COMMAND_LEN - 1] = '\0';
+                
+                // Optional: remove quotes like in global alias handling
+                size_t val_len = strlen(alias_value);
+                if (val_len >= 2 && ((alias_value[0] == '"' && alias_value[val_len-1] == '"') ||
+                    (alias_value[0] == '\'' && alias_value[val_len-1] == '\''))) {
+                    memmove(alias_value, alias_value + 1, val_len - 2);
+                    alias_value[val_len - 2] = '\0';
+                }
+                add_alias_to_table(local_alias_table, &local_alias_count, alias_name, alias_value, MAX_ALIASES);
+            }
+        }
+    }
+    fclose(fp);
 }
 
 // Initialize FileMatches structure
@@ -840,6 +958,12 @@ int main(void) {
     HistoryCache history_cache = {0};
     load_history_cache(&history_cache);
 
+    // Initial load of local aliases for the starting directory
+    char initial_cwd[FILENAME_MAX];
+    if (getcwd(initial_cwd, sizeof(initial_cwd)) != NULL) {
+        load_local_aliases(initial_cwd);
+    }
+
     while (1) {
         
         while ((wpid = waitpid(-1, &status, WNOHANG)) > 0) {
@@ -958,19 +1082,42 @@ int main(void) {
         
         int built_in_executed = 0;
         if (num_segments == 1 && command_segments[0].args[0] != NULL) {
+            // Built-in command check
             if (strcmp(command_segments[0].args[0], "cd") == 0) {
+                char target_dir[FILENAME_MAX];
                 if (command_segments[0].args[1] == NULL) {
                     char *home_dir = getenv("HOME");
                     if (home_dir) {
-                        if (chdir(home_dir) != 0) {
-                            perror("sdn: cd failed");
-                        }
+                        strncpy(target_dir, home_dir, FILENAME_MAX -1);
+                        target_dir[FILENAME_MAX-1] = '\0';
                     } else {
                         fprintf(stderr, "sdn: cd: HOME not set\n");
+                        target_dir[0] = '\0'; 
                     }
                 } else {
-                    if (chdir(command_segments[0].args[1]) != 0) {
+                    strncpy(target_dir, command_segments[0].args[1], FILENAME_MAX -1);
+                    target_dir[FILENAME_MAX-1] = '\0';
+                }
+
+                if (target_dir[0] != '\0') {
+                    clear_local_aliases(); // Clear old local aliases
+                    if (chdir(target_dir) != 0) {
                         perror("sdn: cd failed");
+                        // Attempt to reload local aliases for the original directory if chdir failed
+                        // though current_dir_path might be stale if chdir modified it partially
+                        // For simplicity, we might just leave local aliases cleared or try to get CWD again.
+                        char current_cwd_after_fail[FILENAME_MAX];
+                         if (getcwd(current_cwd_after_fail, sizeof(current_cwd_after_fail)) != NULL) {
+                            load_local_aliases(current_cwd_after_fail);
+                        }
+                    } else {
+                        // chdir was successful, load new local aliases
+                        char new_cwd[FILENAME_MAX];
+                        if (getcwd(new_cwd, sizeof(new_cwd)) != NULL) {
+                            load_local_aliases(new_cwd);
+                        } else {
+                            perror("sdn: getcwd failed after cd");
+                        }
                     }
                 }
                 built_in_executed = 1;
