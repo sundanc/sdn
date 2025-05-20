@@ -13,6 +13,9 @@
 - **Autocompletion**:
   - Tab completion for commands and filenames.
   - Displays matching filenames if multiple options exist.
+- **Alias Support**:
+  - Define and use aliases for commands (e.g., `alias ll="ls -al"`).
+  - Manage aliases with `alias` and `unalias` commands.
 - **Built-in Commands**:
   - `cd`: Change directory.
   - `exit`: Exit the shell.

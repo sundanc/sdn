@@ -15,6 +15,9 @@
 #define HISTORY_FILE_NAME ".sdn_history"
 #define MAX_HISTORY_ENTRIES 1000
 #define MAX_COMMAND_SEGMENTS 10 
+#define MAX_ALIASES 50
+#define MAX_ALIAS_NAME_LEN 50
+#define MAX_ALIAS_COMMAND_LEN MAX_LINE
 
 #define ANSI_COLOR_GRAY "\033[90m"
 #define ANSI_COLOR_RESET "\033[0m"
@@ -32,6 +35,14 @@ typedef struct {
     char *outputFile;
     int appendMode;
 } CommandSegment;
+
+typedef struct {
+    char name[MAX_ALIAS_NAME_LEN];
+    char command[MAX_ALIAS_COMMAND_LEN];
+} AliasEntry;
+
+AliasEntry alias_table[MAX_ALIASES];
+int alias_count = 0;
 
 // Helper structure to store matching files
 typedef struct {
@@ -109,6 +120,117 @@ void free_history_cache(HistoryCache *cache) {
         free(cache->commands[i]);
     }
     cache->count = 0;
+}
+
+const char *find_alias_command(const char *name) {
+    for (int i = 0; i < alias_count; i++) {
+        if (strcmp(alias_table[i].name, name) == 0) {
+            return alias_table[i].command;
+        }
+    }
+    return NULL;
+}
+
+void add_or_update_alias(const char *name, const char *command) {
+    if (strlen(name) >= MAX_ALIAS_NAME_LEN || strlen(command) >= MAX_ALIAS_COMMAND_LEN) {
+        fprintf(stderr, "sdn: alias name or command too long\n");
+        return;
+    }
+    for (int i = 0; i < alias_count; i++) {
+        if (strcmp(alias_table[i].name, name) == 0) {
+            strncpy(alias_table[i].command, command, MAX_ALIAS_COMMAND_LEN -1);
+            alias_table[i].command[MAX_ALIAS_COMMAND_LEN -1] = '\0';
+            return;
+        }
+    }
+    if (alias_count < MAX_ALIASES) {
+        strncpy(alias_table[alias_count].name, name, MAX_ALIAS_NAME_LEN - 1);
+        alias_table[alias_count].name[MAX_ALIAS_NAME_LEN - 1] = '\0';
+        strncpy(alias_table[alias_count].command, command, MAX_ALIAS_COMMAND_LEN - 1);
+        alias_table[alias_count].command[MAX_ALIAS_COMMAND_LEN - 1] = '\0';
+        alias_count++;
+    } else {
+        fprintf(stderr, "sdn: alias table full\n");
+    }
+}
+
+void remove_alias(const char *name) {
+    int found_idx = -1;
+    for (int i = 0; i < alias_count; i++) {
+        if (strcmp(alias_table[i].name, name) == 0) {
+            found_idx = i;
+            break;
+        }
+    }
+    if (found_idx != -1) {
+        for (int i = found_idx; i < alias_count - 1; i++) {
+            alias_table[i] = alias_table[i+1];
+        }
+        alias_count--;
+    } else {
+        fprintf(stderr, "sdn: unalias: %s: not found\n", name);
+    }
+}
+
+void print_all_aliases() {
+    for (int i = 0; i < alias_count; i++) {
+        printf("%s='%s'\n", alias_table[i].name, alias_table[i].command);
+    }
+}
+
+void handle_alias_builtin(char **args) {
+    if (args[1] == NULL) {
+        print_all_aliases();
+        return;
+    }
+
+    char *equals_ptr = strchr(args[1], '=');
+    if (equals_ptr != NULL) {
+        char alias_name[MAX_ALIAS_NAME_LEN];
+        char alias_value[MAX_ALIAS_COMMAND_LEN];
+
+        size_t name_len = equals_ptr - args[1];
+        if (name_len == 0 || name_len >= MAX_ALIAS_NAME_LEN) {
+            fprintf(stderr, "sdn: alias: invalid alias name\n");
+            return;
+        }
+        strncpy(alias_name, args[1], name_len);
+        alias_name[name_len] = '\0';
+
+        char *value_start = equals_ptr + 1;
+        strncpy(alias_value, value_start, MAX_ALIAS_COMMAND_LEN - 1);
+        alias_value[MAX_ALIAS_COMMAND_LEN - 1] = '\0';
+
+        size_t val_len = strlen(alias_value);
+        if ((alias_value[0] == '"' && alias_value[val_len-1] == '"') ||
+            (alias_value[0] == '\'' && alias_value[val_len-1] == '\'')) {
+            memmove(alias_value, alias_value + 1, val_len - 2);
+            alias_value[val_len - 2] = '\0';
+        }
+        
+        add_or_update_alias(alias_name, alias_value);
+    } else {
+        if (args[2] != NULL) {
+            fprintf(stderr, "sdn: alias: usage: alias [name[=value] ...]\n");
+            return;
+        }
+        const char *cmd = find_alias_command(args[1]);
+        if (cmd) {
+            printf("%s='%s'\n", args[1], cmd);
+        } else {
+            fprintf(stderr, "sdn: alias: %s: not found\n", args[1]);
+        }
+    }
+}
+
+void handle_unalias_builtin(char **args) {
+    if (args[1] == NULL) {
+        fprintf(stderr, "sdn: unalias: usage: unalias name [name ...]\n");
+        return;
+    }
+    for (int i = 1; args[i] != NULL; i++) {
+        remove_alias(args[i]);
+    }
 }
 
 // Initialize FileMatches structure
@@ -635,6 +757,7 @@ int main(void) {
     char input_line_raw[MAX_LINE];
     char input_line_for_parsing[MAX_LINE];
     char history_entry_buffer[MAX_LINE];
+    char expanded_line[MAX_LINE];
     
     pid_t wpid; 
     int status;
@@ -661,13 +784,34 @@ int main(void) {
             printf("\nExiting sdn.\n");
             break;
         }
-        
-        strncpy(history_entry_buffer, input_line_raw, MAX_LINE - 1);
-        history_entry_buffer[MAX_LINE - 1] = '\0';
 
         if (strlen(input_line_raw) == 0) {
             continue;
         }
+        
+        strncpy(expanded_line, input_line_raw, sizeof(expanded_line) - 1);
+        expanded_line[sizeof(expanded_line) - 1] = '\0';
+
+        char temp_line_for_first_word[MAX_LINE];
+        strcpy(temp_line_for_first_word, input_line_raw);
+        char *first_word = strtok(temp_line_for_first_word, " \t\n");
+
+        if (first_word) {
+            const char *alias_cmd_str = find_alias_command(first_word);
+            if (alias_cmd_str) {
+                char *rest_of_command = strchr(input_line_raw, ' '); // Find first space
+                if (rest_of_command) { // If there are arguments after the alias
+                    // Skip the space itself for appending
+                    snprintf(expanded_line, sizeof(expanded_line), "%s%s", alias_cmd_str, rest_of_command);
+                } else { // Alias used without arguments
+                    strncpy(expanded_line, alias_cmd_str, sizeof(expanded_line) - 1);
+                    expanded_line[sizeof(expanded_line) - 1] = '\0';
+                }
+            }
+        }
+        
+        strncpy(history_entry_buffer, expanded_line, MAX_LINE - 1);
+        history_entry_buffer[MAX_LINE - 1] = '\0';
 
         if (strlen(history_entry_buffer) > 0) {
             save_to_history(history_entry_buffer);
@@ -686,7 +830,7 @@ int main(void) {
             }
         }
         
-        strcpy(input_line_for_parsing, input_line_raw);
+        strcpy(input_line_for_parsing, expanded_line);
 
         overall_background = 0;
         int len = strlen(input_line_for_parsing);
@@ -735,25 +879,33 @@ int main(void) {
             continue;
         }
         
-        if (num_segments == 1 && command_segments[0].args[0] != NULL && strcmp(command_segments[0].args[0], "cd") == 0) {
-            if (command_segments[0].args[1] == NULL) {
-                char *home_dir = getenv("HOME");
-                if (home_dir) {
-                    if (chdir(home_dir) != 0) {
-                        perror("sdn: cd failed");
+        if (num_segments == 1 && command_segments[0].args[0] != NULL) {
+            if (strcmp(command_segments[0].args[0], "cd") == 0) {
+                if (command_segments[0].args[1] == NULL) {
+                    char *home_dir = getenv("HOME");
+                    if (home_dir) {
+                        if (chdir(home_dir) != 0) {
+                            perror("sdn: cd failed");
+                        }
+                    } else {
+                        fprintf(stderr, "sdn: cd: HOME not set\n");
                     }
                 } else {
-                    fprintf(stderr, "sdn: cd: HOME not set\n");
+                    if (chdir(command_segments[0].args[1]) != 0) {
+                        perror("sdn: cd failed");
+                    }
                 }
-            } else {
-                if (chdir(command_segments[0].args[1]) != 0) {
-                    perror("sdn: cd failed");
-                }
+                continue; 
+            } else if (strcmp(command_segments[0].args[0], "history") == 0) {
+                display_history();
+                continue;
+            } else if (strcmp(command_segments[0].args[0], "alias") == 0) {
+                handle_alias_builtin(command_segments[0].args);
+                continue;
+            } else if (strcmp(command_segments[0].args[0], "unalias") == 0) {
+                handle_unalias_builtin(command_segments[0].args);
+                continue;
             }
-            continue; 
-        } else if (num_segments == 1 && command_segments[0].args[0] != NULL && strcmp(command_segments[0].args[0], "history") == 0) {
-            display_history();
-            continue;
         }
 
         execute_pipeline(command_segments, num_segments, overall_background);
