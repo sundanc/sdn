@@ -21,6 +21,10 @@
 #define MAX_ALIAS_COMMAND_LEN MAX_LINE
 #define LOCAL_ALIASES_FILENAME ".sdn_local_aliases"
 
+#define MAX_VARIABLES 100
+#define MAX_VAR_NAME_LEN 50
+#define MAX_VAR_VALUE_LEN MAX_LINE
+
 #define ANSI_COLOR_GRAY "\033[90m"
 #define ANSI_COLOR_RESET "\033[0m"
 
@@ -43,11 +47,19 @@ typedef struct {
     char command[MAX_ALIAS_COMMAND_LEN];
 } AliasEntry;
 
+typedef struct {
+    char name[MAX_VAR_NAME_LEN];
+    char value[MAX_VAR_VALUE_LEN];
+} VariableEntry;
+
 AliasEntry alias_table[MAX_ALIASES];
 int alias_count = 0;
 
 AliasEntry local_alias_table[MAX_ALIASES];
 int local_alias_count = 0;
+
+VariableEntry variable_table[MAX_VARIABLES];
+int variable_count = 0;
 
 // Helper structure to store matching files
 typedef struct {
@@ -418,24 +430,51 @@ void find_matching_files(const char *prefix, FileMatches *matches) {
         
         // Add file if it matches the prefix
         if (strncmp(entry->d_name, name_prefix, strlen(name_prefix)) == 0) {
-            char *full_path;
+            char *full_path_base; 
+            size_t needed_len;
             if (strcmp(dir_path, ".") == 0) {
-                full_path = strdup(entry->d_name);
+                full_path_base = strdup(entry->d_name);
             } else {
-                full_path = malloc(strlen(dir_path) + strlen(entry->d_name) + 1);
-                sprintf(full_path, "%s%s", dir_path, entry->d_name);
+                // Ensure dir_path ends with a '/' if it's a directory path other than "."
+                // This was a potential source of issues if dir_path was e.g. "/foo" and entry->d_name was "bar"
+                // resulting in "/foobar" instead of "/foo/bar"
+                // However, the logic already tries to add / to dir_path if last_slash is found.
+                // The main concern here is buffer overflow with sprintf.
+                needed_len = strlen(dir_path) + strlen(entry->d_name) + 2; // +1 for potential '/', +1 for null
+                full_path_base = malloc(needed_len);
+                if (full_path_base) {
+                    // Check if dir_path already ends with a slash or is empty (should not be for non-"." case)
+                    if (strlen(dir_path) > 0 && dir_path[strlen(dir_path)-1] == '/') {
+                        snprintf(full_path_base, needed_len, "%s%s", dir_path, entry->d_name);
+                    } else {
+                        snprintf(full_path_base, needed_len, "%s/%s", dir_path, entry->d_name);
+                    }
+                }
+            }
+
+            if (!full_path_base) {
+                perror("sdn: malloc/strdup failed in find_matching_files");
+                continue;
             }
             
             // Add a slash to directories
             if (entry->d_type == DT_DIR) {
-                char *with_slash = malloc(strlen(full_path) + 2);
-                sprintf(with_slash, "%s/", full_path);
-                free(full_path);
-                full_path = with_slash;
+                size_t base_len = strlen(full_path_base);
+                needed_len = base_len + 2; // +1 for '/' and +1 for null terminator
+                char *with_slash = malloc(needed_len);
+                if (with_slash) {
+                    snprintf(with_slash, needed_len, "%s/", full_path_base);
+                    free(full_path_base);
+                    full_path_base = with_slash;
+                } else {
+                    perror("sdn: malloc failed for directory slash");
+                    free(full_path_base);
+                    continue;
+                }
             }
             
-            add_file_match(matches, full_path);
-            free(full_path);
+            add_file_match(matches, full_path_base);
+            free(full_path_base);
         }
     }
     
@@ -550,7 +589,7 @@ int read_line_with_completion(char *buffer, int max_size, HistoryCache *cache) {
         } else if (c == '\t') {
             if (suggestion[0] != '\0') {
                 // Handle command history completion as before
-                if (position + strlen(suggestion) < max_size -1) {
+                if (position + strlen(suggestion) < (size_t)(max_size -1)) { // Cast to size_t
                     strcat(buffer, suggestion);
                     position += strlen(suggestion);
                 }
@@ -631,21 +670,47 @@ int read_line_with_completion(char *buffer, int max_size, HistoryCache *cache) {
             if (position < max_size - 1) {
                 buffer[position++] = c;
                 buffer[position] = '\0';
-                history_nav_idx = cache->count; // Editing, so reset history navigation
                 
-                printf("\033[2K\r"); // Clear entire line, cursor to beginning
-                printf("%s%s", prompt, buffer); // Print prompt and updated buffer
-                
-                suggestion[0] = '\0'; // Clear previous suggestion
-                char *match = find_matching_command(buffer, cache);
-                // `position` is current strlen(buffer)
-                if (match) { // find_matching_command returns NULL if strlen(buffer) is 0
-                    strncpy(suggestion, match + position, MAX_LINE - 1);
-                    suggestion[MAX_LINE-1] = '\0';
-                    if (strlen(suggestion) > 0) {
-                        printf("%s%s%s", ANSI_COLOR_GRAY, suggestion, ANSI_COLOR_RESET);
-                        printf("\033[%dD", (int)strlen(suggestion)); // Move cursor back
+                // Autocomplete suggestion logic
+                // Update suggestion based on current buffer
+                // For command completion (first word)
+                if (strchr(buffer, ' ') == NULL) { 
+                    char *match = find_matching_command(buffer, cache);
+                    if (match) {
+                        strncpy(suggestion, match + strlen(buffer), MAX_LINE - 1 - strlen(buffer));
+                        suggestion[MAX_LINE - 1 - strlen(buffer)] = '\0';
+                    } else {
+                        suggestion[0] = '\0';
                     }
+                } else { // For file/directory completion
+                    // ... (file completion suggestion logic might go here or be part of tab handling) ...
+                    suggestion[0] = '\0'; // Clear for now if not first word
+                }
+
+                // Display current buffer + suggestion
+                // Ensure this part is correct and doesn't cause issues
+                printf("\r%s%s%s%s", prompt, buffer, ANSI_COLOR_GRAY, suggestion);
+                printf(ANSI_COLOR_RESET);
+                // Move cursor back to position after buffer
+                if (strlen(suggestion) > 0) {
+                    for (size_t i = 0; i < strlen(suggestion); ++i) printf("\b");
+                }
+
+                // This was the location of the warning.
+                // The check should be: (current buffer length) + (suggestion length) < max_size
+                // position is already the new length of buffer *after* adding char c.
+                if (position + strlen(suggestion) < (size_t)max_size) {
+                    // It seems the suggestion display logic is already above.
+                    // This check might be redundant or misplaced if suggestion is already part of display.
+                    // The primary concern is that `buffer` itself doesn't overflow.
+                    // `position < max_size - 1` already handles buffer overflow for `c`.
+                    // If `suggestion` is meant to be appended, that needs careful handling.
+                } else {
+                    // If suggestion would cause overflow if appended, clear it.
+                    // suggestion[0] = '\0'; 
+                    // The current display logic prints buffer then suggestion separately, 
+                    // so overflow of a combined string isn't the direct issue here,
+                    // but rather the visual representation and ensuring `buffer` is safe.
                 }
             }
             fflush(stdout); // Ensure character and suggestion are displayed
@@ -710,6 +775,79 @@ void display_history() {
             perror("sdn: error reading history file");
         }
     }
+}
+
+// Helper to check for valid variable name characters
+int is_valid_identifier_char(char c) {
+    return isalnum(c) || c == '_';
+}
+
+// Helper to validate a variable name
+int is_valid_variable_name(const char *name) {
+    if (name == NULL || *name == '\0' || isdigit(*name)) {
+        return 0; // Cannot be empty, NULL, or start with a digit
+    }
+    for (int i = 0; name[i] != '\0'; i++) {
+        if (!is_valid_identifier_char(name[i])) {
+            return 0; // Contains invalid character
+        }
+    }
+    return 1;
+}
+
+// Helper to remove matching leading/trailing quotes (" or ') from a string in-place
+char* unquote_string_in_place(char *str) {
+    if (!str) return str;
+    int len = strlen(str);
+    if (len >= 2) {
+        char first = str[0];
+        char last = str[len - 1];
+        if ((first == '"' && last == '"') || (first == '\'' && last == '\'')) {
+            memmove(str, str + 1, len - 2);
+            str[len - 2] = '\0';
+        }
+    }
+    return str;
+}
+
+// Function to set or update a shell variable
+void set_shell_variable(const char *name, const char *value) {
+    if (!is_valid_variable_name(name)) {
+        fprintf(stderr, "sdn: invalid variable name: %s\n", name);
+        return;
+    }
+    if (strlen(name) >= MAX_VAR_NAME_LEN || strlen(value) >= MAX_VAR_VALUE_LEN) {
+        fprintf(stderr, "sdn: variable name or value too long\n");
+        return;
+    }
+
+    for (int i = 0; i < variable_count; i++) {
+        if (strcmp(variable_table[i].name, name) == 0) {
+            strncpy(variable_table[i].value, value, MAX_VAR_VALUE_LEN - 1);
+            variable_table[i].value[MAX_VAR_VALUE_LEN - 1] = '\0';
+            return;
+        }
+    }
+    if (variable_count < MAX_VARIABLES) {
+        strncpy(variable_table[variable_count].name, name, MAX_VAR_NAME_LEN - 1);
+        variable_table[variable_count].name[MAX_VAR_NAME_LEN - 1] = '\0';
+        strncpy(variable_table[variable_count].value, value, MAX_VAR_VALUE_LEN - 1);
+        variable_table[variable_count].value[MAX_VAR_VALUE_LEN - 1] = '\0';
+        variable_count++;
+    } else {
+        fprintf(stderr, "sdn: maximum number of variables reached\n");
+    }
+}
+
+// Function to get a shell variable's value
+const char *get_shell_variable(const char *name) {
+    for (int i = 0; i < variable_count; i++) {
+        if (strcmp(variable_table[i].name, name) == 0) {
+            return variable_table[i].value;
+        }
+    }
+    // Optionally, could check getenv(name) here as a fallback if desired
+    return NULL;
 }
 
 void free_command_segment_internals(CommandSegment *segment) {
@@ -836,6 +974,107 @@ int parse_single_command_segment(char *segment_str, CommandSegment *cmd_segment)
     return 0;
 }
 
+// Function to expand variables in a list of arguments
+void expand_variables_in_args(char **args) {
+    if (!args) return;
+    for (int i = 0; args[i] != NULL; i++) {
+        if (args[i][0] == '$') {
+            const char *var_name = args[i] + 1; // Skip '$'
+            const char *value = get_shell_variable(var_name);
+            
+            // Environment variable fallback if not in shell variables
+            if (value == NULL) {
+                value = getenv(var_name);
+            }
+
+            if (value != NULL) {
+                free(args[i]); 
+                args[i] = strdup(value);
+                if (!args[i]) {
+                    perror("sdn: strdup error during variable expansion");
+                }
+            } else {
+                // Variable not found, replace with empty string
+                free(args[i]); 
+                args[i] = strdup("");
+                 if (!args[i]) {
+                    perror("sdn: strdup error during variable expansion (empty)");
+                }
+            }
+        }
+    }
+}
+
+void handle_export_builtin(char **args) {
+    if (args[1] == NULL) {
+        // List all environment variables set by this shell instance (those in variable_table and also in environ)
+        // Or simply list all shell variables that have been exported.
+        // For simplicity now, list all shell variables and mark if they are in environ.
+        printf("Shell Variables (export VAR or VAR=value to set/export):\n");
+        for(int i=0; i<variable_count; ++i) {
+            const char* env_val = getenv(variable_table[i].name);
+            printf("  %s=%s%s\n", variable_table[i].name, variable_table[i].value, env_val ? " (exported)" : "");
+        }
+        return;
+    }
+
+    for (int i = 1; args[i] != NULL; i++) {
+        char *arg_copy = strdup(args[i]);
+        if (!arg_copy) {
+            perror("sdn: strdup failed in export");
+            continue;
+        }
+
+        char *eq_ptr = strchr(arg_copy, '=');
+        char *var_name;
+        const char *var_value_str; // This will be the string representation of the value
+
+        if (eq_ptr != NULL) { // Case: export VAR=value
+            *eq_ptr = '\0'; // Split name and value
+            var_name = arg_copy;
+            var_value_str = eq_ptr + 1;
+            
+            // Unquote the value part if it's quoted
+            char temp_value_for_unquoting[MAX_VAR_VALUE_LEN];
+            strncpy(temp_value_for_unquoting, var_value_str, MAX_VAR_VALUE_LEN -1);
+            temp_value_for_unquoting[MAX_VAR_VALUE_LEN-1] = '\0';
+            unquote_string_in_place(temp_value_for_unquoting);
+
+            if (!is_valid_variable_name(var_name)) {
+                 fprintf(stderr, "sdn: export: '%s': not a valid identifier\n", var_name);
+                 free(arg_copy);
+                 continue;
+            }
+            set_shell_variable(var_name, temp_value_for_unquoting); // Set/update in shell's internal table
+            // Use temp_value_for_unquoting for setenv as well
+            if (setenv(var_name, temp_value_for_unquoting, 1) != 0) {
+                perror("sdn: export: setenv failed");
+            }
+        } else { // Case: export VAR
+            var_name = arg_copy;
+            if (!is_valid_variable_name(var_name)) {
+                 fprintf(stderr, "sdn: export: '%s': not a valid identifier\n", var_name);
+                 free(arg_copy);
+                 continue;
+            }
+            var_value_str = get_shell_variable(var_name); // Get from shell's internal table
+            if (var_value_str != NULL) {
+                if (setenv(var_name, var_value_str, 1) != 0) { // Value is already unquoted from table
+                    perror("sdn: export: setenv failed");
+                }
+            } else {
+                 // If not in shell variables, check if it's an environment variable already
+                 // If so, it's effectively "exported". If not, it's an error to export non-existent var.
+                if (getenv(var_name) == NULL) {
+                    fprintf(stderr, "sdn: export: variable '%s' not found in shell or environment\n", var_name);
+                }
+                // If it exists in env but not shell, setenv will effectively re-export it or do nothing if value is same.
+                // No explicit action needed if it's already an env var but not a shell var.
+            }
+        }
+        free(arg_copy);
+    }
+}
 
 void execute_pipeline(CommandSegment segments[], int num_segments, int background) {
     int pipe_fds[2];
@@ -937,7 +1176,6 @@ void execute_pipeline(CommandSegment segments[], int num_segments, int backgroun
         printf("\n");
     }
 }
-
 
 int main(void) {
     char input_line_raw[MAX_LINE];
@@ -1128,6 +1366,9 @@ int main(void) {
                 built_in_executed = 1;
             } else if (strcmp(command_segments[0].args[0], "unalias") == 0) {
                 handle_unalias_builtin(command_segments[0].args);
+                built_in_executed = 1;
+            } else if (strcmp(command_segments[0].args[0], "export") == 0) {
+                handle_export_builtin(command_segments[0].args);
                 built_in_executed = 1;
             }
         }

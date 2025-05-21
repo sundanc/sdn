@@ -143,19 +143,25 @@ static void apply_theme(VteTerminal *terminal, TerminalTheme theme) {
 static gboolean on_key_press(GtkWidget *widget, GdkEventKey *event, gpointer user_data) { // Changed GtkWidget *terminal to GtkWidget *widget
     (void)user_data; // Suppress unused parameter warning
     VteTerminal *terminal = VTE_TERMINAL(widget); // Cast widget to VteTerminal
+    g_print("on_key_press: keyval=0x%x, state=0x%x, GDK_KEY_C=0x%x, GDK_CONTROL_MASK=0x%x, GDK_SHIFT_MASK=0x%x\n", 
+            event->keyval, event->state, GDK_KEY_C, GDK_CONTROL_MASK, GDK_SHIFT_MASK);
+
 
     // Ctrl+Shift+C - Copy
     if ((event->state & GDK_CONTROL_MASK) && (event->state & GDK_SHIFT_MASK) && event->keyval == GDK_KEY_C) {
+        g_print("Ctrl+Shift+C detected for copy\n");
         vte_terminal_copy_clipboard_format(terminal, VTE_FORMAT_TEXT);
         return TRUE; // Event handled
     }
     
     // Ctrl+Shift+V - Paste
     if ((event->state & GDK_CONTROL_MASK) && (event->state & GDK_SHIFT_MASK) && event->keyval == GDK_KEY_V) {
+        g_print("Ctrl+Shift+V detected for paste\n");
         vte_terminal_paste_clipboard(terminal);
         return TRUE; // Event handled
     }
     
+    g_print("Key press not handled by custom shortcuts.\n");
     // Let the terminal handle other keypresses
     return FALSE;
 }
