@@ -10,6 +10,7 @@
 #include <fcntl.h>
 #include <dirent.h> // Add for directory operations
 #include <glob.h>   // For wildcard expansion (globbing)
+#include <stdbool.h> // ADDED FOR bool, true, false
 
 #define MAX_LINE 80 
 #define MAX_ARGS 20 
@@ -394,6 +395,8 @@ char *get_current_word(const char *buffer, int position) {
 
 // Find files that match the prefix
 void find_matching_files(const char *prefix, FileMatches *matches) {
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wformat-truncation"
     DIR *dir;
     struct dirent *entry;
     
@@ -440,6 +443,8 @@ void find_matching_files(const char *prefix, FileMatches *matches) {
                 // resulting in "/foobar" instead of "/foo/bar"
                 // However, the logic already tries to add / to dir_path if last_slash is found.
                 // The main concern here is buffer overflow with sprintf.
+                // However, the logic already tries to add / to dir_path if last_slash is found.
+                // The main concern here is buffer overflow with sprintf.
                 needed_len = strlen(dir_path) + strlen(entry->d_name) + 2; // +1 for potential '/', +1 for null
                 full_path_base = malloc(needed_len);
                 if (full_path_base) {
@@ -481,6 +486,7 @@ void find_matching_files(const char *prefix, FileMatches *matches) {
     closedir(dir);
     if (strcmp(dir_path, ".") != 0) free(dir_path);
     free(name_prefix);
+#pragma GCC diagnostic pop
 }
 
 // Find the longest common prefix among matching files
@@ -850,6 +856,142 @@ const char *get_shell_variable(const char *name) {
     return NULL;
 }
 
+// NEW helper function to expand variables in a single argument string.
+// Returns a new heap-allocated string with variables expanded and quotes removed,
+// or NULL if no effective change was made to the string.
+// The caller is responsible for freeing the returned string.
+// Handles $VAR, ${VAR}. Expansion occurs unless within single quotes.
+// Outer single or double quotes are removed.
+char* expand_single_argument(const char *arg_str) {
+    if (arg_str == NULL) return NULL;
+
+    char expanded_arg_buffer[MAX_LINE * 2]; // Buffer for the new argument
+    char *write_ptr = expanded_arg_buffer;
+    const char *read_ptr = arg_str;
+    
+    int original_len = strlen(arg_str);
+    if (original_len == 0) { // No change for an empty string that was already empty
+        // If arg_str was "" and it becomes "", no change.
+        // If arg_str was '' or "" (len 2) and becomes "", it's a change.
+        // This case is handled by strcmp at the end if original_len was 0.
+        // Let's be explicit: if original is empty, result is empty, no change.
+         return NULL;
+    }
+
+    bool outer_double_quoted = false;
+    bool outer_single_quoted = false;
+
+    // Check for and prepare to strip outer quotes
+    if (original_len >= 2) {
+        if (arg_str[0] == '"' && arg_str[original_len - 1] == '"') {
+            outer_double_quoted = true;
+            read_ptr++; // Skip leading quote
+        } else if (arg_str[0] == '\'' && arg_str[original_len - 1] == '\'') {
+            outer_single_quoted = true;
+            read_ptr++; // Skip leading quote
+        }
+    }
+
+    const char *scan_end_ptr = arg_str + original_len;
+    if (outer_double_quoted || outer_single_quoted) {
+        scan_end_ptr--; // Adjust for the trailing quote
+    }
+
+    while (read_ptr < scan_end_ptr && *read_ptr != '\0') {
+        if (write_ptr >= expanded_arg_buffer + sizeof(expanded_arg_buffer) - 1) {
+            fprintf(stderr, "sdn: warning: argument too long during expansion, truncated: %s\n", arg_str);
+            break; 
+        }
+
+        if (*read_ptr == '$' && !outer_single_quoted) { // Expand if not single-quoted content
+            const char *var_name_parse_start = read_ptr + 1; // Point after '$'
+            char var_name[MAX_VAR_NAME_LEN];
+            int var_name_len = 0; 
+            const char *next_read_ptr = var_name_parse_start; // Will point after the var syntax
+
+            if (*var_name_parse_start == '{') { // ${VAR}
+                next_read_ptr++; // Skip '{'
+                while (*next_read_ptr != '\0' && *next_read_ptr != '}' && var_name_len < MAX_VAR_NAME_LEN - 1) {
+                    if (!is_valid_identifier_char(*next_read_ptr)) break; 
+                    var_name[var_name_len++] = *next_read_ptr++;
+                }
+                var_name[var_name_len] = '\0';
+                if (*next_read_ptr == '}') { // Found closing brace
+                    next_read_ptr++; // Skip '}'
+                } else { // Mismatched brace, invalid char, or end of string
+                    var_name_len = 0; // Signal failure to parse a valid ${VAR}
+                    next_read_ptr = var_name_parse_start; // Reset to only consume '$'
+                }
+            } else { // $VAR
+                while (*next_read_ptr != '\0' && is_valid_identifier_char(*next_read_ptr) && var_name_len < MAX_VAR_NAME_LEN - 1) {
+                    var_name[var_name_len++] = *next_read_ptr++;
+                }
+                var_name[var_name_len] = '\0';
+                // If var_name_len is 0, it means '$' was followed by non-identifier or EOS.
+                // next_read_ptr is already at the char after the potential var name.
+            }
+
+            if (var_name_len > 0) { // Successfully parsed a variable name
+                const char *value = get_shell_variable(var_name);
+                if (value == NULL) value = getenv(var_name);
+
+                if (value != NULL) {
+                    size_t value_len_to_copy = strlen(value);
+                    if ((write_ptr - expanded_arg_buffer + value_len_to_copy) < sizeof(expanded_arg_buffer) - 1) {
+                        strcpy(write_ptr, value);
+                        write_ptr += value_len_to_copy;
+                    } else {
+                        size_t space_left = sizeof(expanded_arg_buffer) - (write_ptr - expanded_arg_buffer) - 1;
+                        strncpy(write_ptr, value, space_left);
+                        write_ptr += space_left;
+                        // Buffer became full during copy, next iteration of outer loop will break.
+                    }
+                }
+                // If value is NULL (undefined variable), it's treated as an empty string (nothing is copied).
+                read_ptr = next_read_ptr; // Update main read pointer past the variable syntax
+            } else { // '$' not followed by a valid variable name structure
+                *write_ptr++ = *read_ptr++; // Copy '$' literally, advance main read_ptr by 1
+            }
+        } else { // Not a variable for expansion (or inside single quotes), copy literally
+            *write_ptr++ = *read_ptr++;
+        }
+    }
+    *write_ptr = '\0'; // Null-terminate the expanded string
+
+    // If expanded_arg_buffer is different from original arg_str, return new string. Otherwise NULL.
+    if (strcmp(arg_str, expanded_arg_buffer) != 0) {
+        return strdup(expanded_arg_buffer);
+    } else {
+        return NULL;
+    }
+}
+
+
+// Function to expand variables in a list of arguments (MODIFIED to use expand_single_argument)
+void expand_variables_in_args(char **args) {
+    if (!args) return;
+    for (int i = 0; args[i] != NULL; i++) {
+        char *expanded_val = expand_single_argument(args[i]);
+        if (expanded_val != NULL) {
+            free(args[i]);
+            args[i] = expanded_val; 
+        }
+    }
+}
+
+// NEW built-in handler for echo
+void handle_echo_builtin(char **args) {
+    // args[0] is "echo". Start printing from args[1].
+    for (int i = 1; args[i] != NULL; i++) {
+        printf("%s", args[i]);
+        if (args[i+1] != NULL) {
+            printf(" "); // Add space between arguments
+        }
+    }
+    printf("\n");
+    // fflush(stdout); // Usually not needed for printf with \n
+}
+
 void free_command_segment_internals(CommandSegment *segment) {
     for (int i = 0; segment->args[i] != NULL; i++) {
         free(segment->args[i]);
@@ -972,37 +1114,6 @@ int parse_single_command_segment(char *segment_str, CommandSegment *cmd_segment)
     }
     cmd_segment->args[current_arg_idx] = NULL; 
     return 0;
-}
-
-// Function to expand variables in a list of arguments
-void expand_variables_in_args(char **args) {
-    if (!args) return;
-    for (int i = 0; args[i] != NULL; i++) {
-        if (args[i][0] == '$') {
-            const char *var_name = args[i] + 1; // Skip '$'
-            const char *value = get_shell_variable(var_name);
-            
-            // Environment variable fallback if not in shell variables
-            if (value == NULL) {
-                value = getenv(var_name);
-            }
-
-            if (value != NULL) {
-                free(args[i]); 
-                args[i] = strdup(value);
-                if (!args[i]) {
-                    perror("sdn: strdup error during variable expansion");
-                }
-            } else {
-                // Variable not found, replace with empty string
-                free(args[i]); 
-                args[i] = strdup("");
-                 if (!args[i]) {
-                    perror("sdn: strdup error during variable expansion (empty)");
-                }
-            }
-        }
-    }
 }
 
 void handle_export_builtin(char **args) {
@@ -1307,6 +1418,16 @@ int main(void) {
             command_str = strtok_r(NULL, "|", &saveptr_pipe);
         }
 
+        // Perform variable expansion for all segments after parsing
+        if (num_segments > 0) {
+            for (int k_seg = 0; k_seg < num_segments; k_seg++) {
+                if (command_segments[k_seg].args[0] != NULL) { // Ensure there are args to expand
+                    expand_variables_in_args(command_segments[k_seg].args);
+                }
+            }
+        }
+
+
         if (num_segments == -1 || (num_segments == 0 && strlen(input_line_for_parsing) > 0) ) { 
              for (int k = 0; k < MAX_COMMAND_SEGMENTS; k++) { 
                 free_command_segment_internals(&command_segments[k]);
@@ -1357,6 +1478,9 @@ int main(void) {
                         }
                     }
                 }
+                built_in_executed = 1;
+            } else if (strcmp(command_segments[0].args[0], "echo") == 0) { // ADDED echo built-in check
+                handle_echo_builtin(command_segments[0].args);
                 built_in_executed = 1;
             } else if (strcmp(command_segments[0].args[0], "history") == 0) {
                 display_history();
