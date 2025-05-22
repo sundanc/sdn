@@ -24,33 +24,41 @@ typedef enum {
     THEME_GRAY
 } TerminalTheme;
 
+static GtkNotebook *notebook; // Global notebook reference
+static TerminalTheme global_current_theme;
+static char* global_shell_path;
+
 static void apply_theme(VteTerminal *terminal, TerminalTheme theme);
-static gboolean on_key_press(GtkWidget *widget, GdkEventKey *event, gpointer user_data); // Changed GtkWidget *terminal to GtkWidget *widget
+// Forward declaration for the new tab creation function
+static void create_new_terminal_tab(GtkNotebook *notebook_widget, TerminalTheme theme, const char *shell_path_arg);
+static gboolean on_key_press(GtkWidget *widget, GdkEventKey *event, gpointer user_data);
 static void on_child_exit(VteTerminal *terminal, gint status, gpointer user_data);
 static gchar* get_shell_path();
 static void spawn_callback(VteTerminal *terminal, GPid pid, GError *error, gpointer user_data);
 
 int main(int argc, char *argv[]) {
-    GtkWidget *window, *terminal;
-    char *shell_path;
-    char **command;
-    TerminalTheme current_theme = THEME_DARK; // Default theme
+    GtkWidget *window;
+    // char *shell_path; // Now global_shell_path
+    // char **command; // Will be set in create_new_terminal_tab
+    // TerminalTheme current_theme = THEME_DARK; // Now global_current_theme
 
     // Initialize GTK (should be called before any GTK functions)
     gtk_init(&argc, &argv);
+
+    global_current_theme = THEME_DARK; // Default theme
 
     // Parse command-line arguments for theme
     for (int i = 1; i < argc; i++) {
         if (g_strcmp0(argv[i], "--theme") == 0 && i + 1 < argc) {
             i++; // Move to the theme name
             if (g_strcmp0(argv[i], "light-blue") == 0) {
-                current_theme = THEME_LIGHT_BLUE;
+                global_current_theme = THEME_LIGHT_BLUE;
             } else if (g_strcmp0(argv[i], "light") == 0) {
-                current_theme = THEME_LIGHT_MODE;
+                global_current_theme = THEME_LIGHT_MODE;
             } else if (g_strcmp0(argv[i], "gray") == 0) {
-                current_theme = THEME_GRAY;
+                global_current_theme = THEME_GRAY;
             } else if (g_strcmp0(argv[i], "dark") == 0) {
-                current_theme = THEME_DARK;
+                global_current_theme = THEME_DARK;
             } else {
                 g_warning("Unknown theme: %s. Using default (dark).", argv[i]);
             }
@@ -79,46 +87,20 @@ int main(int argc, char *argv[]) {
         g_free(icon_path);
     }
 
-    // Create terminal widget
-    terminal = vte_terminal_new();
-    gtk_container_add(GTK_CONTAINER(window), terminal);
-
-    // Set terminal colors based on selected theme
-    apply_theme(VTE_TERMINAL(terminal), current_theme);
-
-    // Set scrollback lines
-    vte_terminal_set_scrollback_lines(VTE_TERMINAL(terminal), 10000);
-
-    // Connect signals
-    g_signal_connect(terminal, "child-exited", G_CALLBACK(on_child_exit), window);
-    g_signal_connect(terminal, "key-press-event", G_CALLBACK(on_key_press), NULL);
+    // Create notebook
+    notebook = GTK_NOTEBOOK(gtk_notebook_new());
+    gtk_container_add(GTK_CONTAINER(window), GTK_WIDGET(notebook));
+    gtk_notebook_set_scrollable(notebook, TRUE); // Allow scrolling if many tabs
 
     // Get the path to the sdn shell
-    shell_path = get_shell_path();
-    if (!shell_path) {
+    global_shell_path = get_shell_path();
+    if (!global_shell_path) {
         g_error("Could not find sdn shell executable.");
         return 1;
     }
 
-    // Setup command: {shell_path, NULL}
-    command = (char*[]){shell_path, NULL};
-
-    // Start shell in terminal using the non-deprecated spawn_async function
-    vte_terminal_spawn_async(
-        VTE_TERMINAL(terminal),       // VteTerminal *terminal
-        VTE_PTY_DEFAULT,              // VtePtyFlags pty_flags
-        NULL,                         // const char *working_directory
-        command,                      // char **argv
-        NULL,                         // char **envv
-        G_SPAWN_DEFAULT,              // GSpawnFlags spawn_flags
-        NULL,                         // GSpawnChildSetupFunc child_setup
-        NULL,                         // gpointer child_setup_data
-        NULL,                         // GDestroyNotify child_setup_data_destroy
-        -1,                           // int timeout
-        NULL,                         // GCancellable *cancellable
-        (VteTerminalSpawnAsyncCallback)spawn_callback, // VteTerminalSpawnAsyncCallback callback
-        window                        // gpointer user_data
-    );
+    // Create the first tab
+    create_new_terminal_tab(notebook, global_current_theme, global_shell_path);
 
     // Show everything
     gtk_widget_show_all(window);
@@ -126,8 +108,41 @@ int main(int argc, char *argv[]) {
     // Main loop
     gtk_main();
 
-    free(shell_path);
+    free(global_shell_path);
     return 0;
+}
+
+// Helper function to create and add a new terminal tab
+static void create_new_terminal_tab(GtkNotebook *notebook_widget, TerminalTheme theme, const char *shell_path_arg) {
+    GtkWidget *terminal_widget = vte_terminal_new();
+    VteTerminal *vte_term = VTE_TERMINAL(terminal_widget);
+
+    apply_theme(vte_term, theme);
+    vte_terminal_set_scrollback_lines(vte_term, 10000);
+
+    // Connect signals for this new terminal
+    g_signal_connect(vte_term, "child-exited", G_CALLBACK(on_child_exit), NULL); // user_data is NULL
+    g_signal_connect(vte_term, "key-press-event", G_CALLBACK(on_key_press), NULL); // user_data is NULL
+
+    char **command = (char*[]){(char*)shell_path_arg, NULL};
+
+    vte_terminal_spawn_async(
+        vte_term,
+        VTE_PTY_DEFAULT,
+        NULL, command, NULL, G_SPAWN_DEFAULT,
+        NULL, NULL, NULL, -1, NULL,
+        (VteTerminalSpawnAsyncCallback)spawn_callback,
+        gtk_widget_get_ancestor(GTK_WIDGET(notebook_widget), GTK_TYPE_WINDOW) // Pass main window to spawn_callback
+    );
+
+    // Create a label for the tab
+    GtkWidget *tab_label = gtk_label_new("Terminal"); 
+
+    // Add the terminal to the notebook
+    gtk_notebook_append_page(GTK_NOTEBOOK(notebook_widget), terminal_widget, tab_label);
+    gtk_widget_show_all(GTK_WIDGET(notebook_widget)); 
+    gtk_notebook_set_current_page(GTK_NOTEBOOK(notebook_widget), gtk_notebook_get_n_pages(GTK_NOTEBOOK(notebook_widget)) - 1);
+    gtk_widget_grab_focus(terminal_widget);
 }
 
 // Function to apply theme colors
@@ -157,24 +172,62 @@ static void apply_theme(VteTerminal *terminal, TerminalTheme theme) {
 }
 
 // Handle keyboard shortcuts
-static gboolean on_key_press(GtkWidget *widget, GdkEventKey *event, gpointer user_data) { // Changed GtkWidget *terminal to GtkWidget *widget
+static gboolean on_key_press(GtkWidget *widget, GdkEventKey *event, gpointer user_data) { 
     (void)user_data; // Suppress unused parameter warning
-    VteTerminal *terminal = VTE_TERMINAL(widget); // Cast widget to VteTerminal
-    g_print("on_key_press: keyval=0x%x, state=0x%x, GDK_KEY_C=0x%x, GDK_CONTROL_MASK=0x%x, GDK_SHIFT_MASK=0x%x\n", 
-            event->keyval, event->state, GDK_KEY_C, GDK_CONTROL_MASK, GDK_SHIFT_MASK);
+    VteTerminal *current_terminal = VTE_TERMINAL(widget); // This is the terminal that received the key press
+    GtkWidget *current_page_widget = GTK_WIDGET(current_terminal);
 
+    // Ctrl+Shift+T - New Tab
+    if ((event->state & GDK_CONTROL_MASK) && (event->state & GDK_SHIFT_MASK) && event->keyval == GDK_KEY_T) {
+        create_new_terminal_tab(notebook, global_current_theme, global_shell_path);
+        return TRUE; // Event handled
+    }
+
+    // Ctrl+W - Close current tab
+    if ((event->state & GDK_CONTROL_MASK) && event->keyval == GDK_KEY_w) {
+        gint page_num = gtk_notebook_page_num(notebook, current_page_widget);
+        if (page_num != -1) {
+            // We need to find the VteTerminal within the page to call vte_terminal_get_child_pid
+            // and then potentially kill the process if it's still running.
+            // For now, just remove the page. A more robust solution would handle child processes.
+            gtk_notebook_remove_page(notebook, page_num);
+            if (gtk_notebook_get_n_pages(notebook) == 0) {
+                gtk_main_quit();
+            }
+        }
+        return TRUE; // Event handled
+    }
+
+    // Alt + Number to switch tabs (1-9)
+    if ((event->state & GDK_MOD1_MASK) && (event->keyval >= GDK_KEY_1 && event->keyval <= GDK_KEY_9)) {
+        gint target_page = event->keyval - GDK_KEY_1;
+        gint n_pages = gtk_notebook_get_n_pages(notebook);
+        if (target_page < n_pages) {
+            gtk_notebook_set_current_page(notebook, target_page);
+        }
+        return TRUE; // Event handled
+    }
+    // Alt + 0 to switch to the 10th tab (if it exists)
+    if ((event->state & GDK_MOD1_MASK) && event->keyval == GDK_KEY_0) {
+        gint target_page = 9; // 0 maps to the 10th tab (index 9)
+        gint n_pages = gtk_notebook_get_n_pages(notebook);
+        if (target_page < n_pages) {
+            gtk_notebook_set_current_page(notebook, target_page);
+        }
+        return TRUE; // Event handled
+    }
 
     // Ctrl+Shift+C - Copy
     if ((event->state & GDK_CONTROL_MASK) && (event->state & GDK_SHIFT_MASK) && event->keyval == GDK_KEY_C) {
         g_print("Ctrl+Shift+C detected for copy\n");
-        vte_terminal_copy_clipboard_format(terminal, VTE_FORMAT_TEXT);
+        vte_terminal_copy_clipboard_format(current_terminal, VTE_FORMAT_TEXT);
         return TRUE; // Event handled
     }
     
     // Ctrl+Shift+V - Paste
     if ((event->state & GDK_CONTROL_MASK) && (event->state & GDK_SHIFT_MASK) && event->keyval == GDK_KEY_V) {
         g_print("Ctrl+Shift+V detected for paste\n");
-        vte_terminal_paste_clipboard(terminal);
+        vte_terminal_paste_clipboard(current_terminal);
         return TRUE; // Event handled
     }
     
@@ -184,12 +237,18 @@ static gboolean on_key_press(GtkWidget *widget, GdkEventKey *event, gpointer use
 }
 
 // Handle terminal exit
-static void on_child_exit(VteTerminal *terminal, gint status, gpointer user_data) {
-    (void)terminal; // Suppress unused parameter warning
+static void on_child_exit(VteTerminal *exited_terminal, gint status, gpointer user_data) {
     (void)status;   // Suppress unused parameter warning
-    GtkWidget *window = GTK_WIDGET(user_data);
-    gtk_widget_destroy(window);
-    gtk_main_quit();
+    (void)user_data; // Suppress unused parameter warning, as exited_terminal is the one we need.
+
+    gint page_num = gtk_notebook_page_num(notebook, GTK_WIDGET(exited_terminal));
+    if (page_num != -1) {
+        gtk_notebook_remove_page(notebook, page_num);
+    }
+
+    if (gtk_notebook_get_n_pages(notebook) == 0) {
+        gtk_main_quit();
+    }
 }
 
 // Get the path to the sdn shell
@@ -240,14 +299,25 @@ static gchar* get_shell_path() {
 
 // Callback for spawn_async
 static void spawn_callback(VteTerminal *terminal, GPid pid, GError *error, gpointer user_data) {
-    (void)terminal; // Suppress unused parameter warning
     (void)pid;      // Suppress unused parameter warning
-    GtkWidget *window = GTK_WIDGET(user_data);
+    (void)user_data; // Suppress unused parameter warning
+    // GtkWidget *window = GTK_WIDGET(user_data); // Main window passed as user_data
     
     if (error != NULL) {
-        g_printerr("Error spawning terminal: %s\n", error->message);
+        g_printerr("Error spawning terminal in tab: %s\n", error->message);
         g_error_free(error);
-        gtk_widget_destroy(window);
-        gtk_main_quit();
+        
+        // Find and remove the tab associated with this terminal
+        gint page_num = gtk_notebook_page_num(notebook, GTK_WIDGET(terminal));
+        if (page_num != -1) {
+            gtk_notebook_remove_page(notebook, page_num);
+        }
+        
+        if (gtk_notebook_get_n_pages(notebook) == 0) {
+            // If it was the last tab (or the first and only tab failing), quit.
+            // GtkWidget *main_window = GTK_WIDGET(user_data);
+            // if (main_window) gtk_widget_destroy(main_window); // Could also destroy the window explicitly
+            gtk_main_quit();
+        }
     }
 }

@@ -124,4 +124,8 @@ make uninstall
 
 - `Ctrl+Shift+C`: Copy selected text
 - `Ctrl+Shift+V`: Paste from clipboard
+- `Ctrl+Shift+T`: Open a new tab
+- `Ctrl+W`: Close the current tab
+- `Alt+[1-9]`: Switch to tab 1 through 9
+- `Alt+0`: Switch to tab 10
 - `Ctrl+D`: Exit the shell
