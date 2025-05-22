@@ -23,6 +23,8 @@ install: sdn sdn_terminal
 	cp sdn_terminal $(HOME)/.local/bin/
 	mkdir -p $(HOME)/.local/share/applications/
 	cp sdn.desktop $(HOME)/.local/share/applications/ || true
+	mkdir -p $(HOME)/.local/share/icons/hicolor/48x48/apps/
+	cp sdn_terminal.png $(HOME)/.local/share/icons/hicolor/48x48/apps/sdn_terminal.png || true
 	@echo "Installed to $(HOME)/.local/bin"
 	@echo "Updating desktop database..."
 	@update-desktop-database -q $(HOME)/.local/share/applications || echo "Failed to update desktop database. Please run 'update-desktop-database ~/.local/share/applications' manually if the app doesn't appear."
@@ -32,6 +34,7 @@ uninstall:
 	rm -f $(HOME)/.local/bin/sdn
 	rm -f $(HOME)/.local/bin/sdn_terminal
 	rm -f $(HOME)/.local/share/applications/sdn.desktop
+	rm -f $(HOME)/.local/share/icons/hicolor/48x48/apps/sdn_terminal.png
 	echo "Uninstalled from $(HOME)/.local/bin"
 
 # Clean build artifacts
@@ -44,7 +47,7 @@ run: sdn_terminal
 
 # Create a release tarball
 RELEASE_NAME = sdn-0.1
-RELEASE_FILES = sdn sdn_terminal README.md LICENSE.md Makefile sdn.desktop
+RELEASE_FILES = sdn sdn_terminal README.md LICENSE.md Makefile sdn.desktop sdn_terminal.png
 RELEASE_ARCHIVE = $(RELEASE_NAME).tar.gz
 
 release: all

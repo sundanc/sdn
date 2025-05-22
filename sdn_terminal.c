@@ -14,6 +14,7 @@
 #define WINDOW_TITLE "SDN Terminal"
 #define DEFAULT_WIDTH 800
 #define DEFAULT_HEIGHT 500
+#define ICON_NAME "sdn_terminal" // Define the icon name
 
 // Theme definitions
 typedef enum {
@@ -61,6 +62,22 @@ int main(int argc, char *argv[]) {
     gtk_window_set_title(GTK_WINDOW(window), WINDOW_TITLE);
     gtk_window_set_default_size(GTK_WINDOW(window), DEFAULT_WIDTH, DEFAULT_HEIGHT);
     g_signal_connect(window, "delete-event", G_CALLBACK(gtk_main_quit), NULL);
+
+    // Set window icon
+    GtkWindow *gtk_window = GTK_WINDOW(window);
+    GtkIconTheme *icon_theme = gtk_icon_theme_get_default();
+    if (gtk_icon_theme_has_icon(icon_theme, ICON_NAME)) {
+        gtk_window_set_icon_name(gtk_window, ICON_NAME);
+    } else {
+        // Fallback if icon is not found in theme, try to load from file
+        gchar *icon_path = g_build_filename(g_get_user_data_dir(), "icons", "hicolor", "48x48", "apps", ICON_NAME ".png", NULL);
+        if (g_file_test(icon_path, G_FILE_TEST_EXISTS)) {
+            gtk_window_set_icon_from_file(gtk_window, icon_path, NULL);
+        } else {
+            g_warning("Could not load icon: %s or find it in path: %s", ICON_NAME, icon_path);
+        }
+        g_free(icon_path);
+    }
 
     // Create terminal widget
     terminal = vte_terminal_new();
