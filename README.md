@@ -93,6 +93,12 @@ You can run the terminal emulator in several ways:
    ```
 
 3. From your desktop environment's application menu (search for "SDN Terminal")
+   
+   **Note:** The desktop entry (`sdn.desktop`) uses the `Exec` field to launch `sdn_terminal` from your user install location. By default, this is:
+   ```ini
+   Exec=/home/your_username/.local/bin/sdn_terminal
+   ```
+   Update it accordingly. 
 
 ## Using Just the Shell
 

@@ -1,7 +1,7 @@
 [Desktop Entry]
 Name=SDN Terminal
 Comment=Terminal emulator with SDN shell
-Exec=sdn_terminal
+Exec=/home/your_username/.local/bin/sdn_terminal
 Icon=utilities-terminal
 Terminal=false
 Type=Application
