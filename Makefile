@@ -3,7 +3,7 @@ CFLAGS = -Wall -Wextra -O2
 TERMINAL_CFLAGS = $(shell pkg-config --cflags gtk+-3.0 vte-2.91)
 TERMINAL_LIBS = $(shell pkg-config --libs gtk+-3.0 vte-2.91)
 
-.PHONY: all clean install uninstall
+.PHONY: all clean install uninstall release
 
 all: sdn sdn_terminal
 
@@ -41,3 +41,17 @@ clean:
 # Rule to run the terminal
 run: sdn_terminal
 	./sdn_terminal
+
+# Create a release tarball
+RELEASE_NAME = sdn-0.1
+RELEASE_FILES = sdn sdn_terminal README.md LICENSE.md Makefile sdn.desktop
+RELEASE_ARCHIVE = $(RELEASE_NAME).tar.gz
+
+release: all
+	@echo "Creating release archive: $(RELEASE_ARCHIVE)"
+	rm -rf $(RELEASE_NAME) $(RELEASE_ARCHIVE)
+	mkdir -p $(RELEASE_NAME)
+	cp $(RELEASE_FILES) $(RELEASE_NAME)/
+	tar -czf $(RELEASE_ARCHIVE) $(RELEASE_NAME)
+	rm -rf $(RELEASE_NAME)
+	@echo "Release archive created: $(RELEASE_ARCHIVE)"

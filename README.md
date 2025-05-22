@@ -94,11 +94,10 @@ You can run the terminal emulator in several ways:
 
 3. From your desktop environment's application menu (search for "SDN Terminal")
    
-   **Note:** The desktop entry (`sdn.desktop`) uses the `Exec` field to launch `sdn_terminal` from your user install location. By default, this is:
-   ```ini
-   Exec=/home/your_username/.local/bin/sdn_terminal
-   ```
-   Update it accordingly. 
+   **Note:** The desktop entry (`sdn.desktop`) uses the `Exec` field to launch `sdn_terminal` from your user install location. 
+   If you are installing from a release archive (e.g, `sdn-0.1.tar.gz`), the `sdn.desktop` file within the archive will have a placeholder username in the `Exec` path (e.g., `Exec=/home/your_username/.local/bin/sdn_terminal`). 
+   You **must** manually edit this file after installation (usually found in `~/.local/share/applications/sdn.desktop`) and replace `your_username` with your actual username for the desktop entry to work correctly.
+   By default, if you build and install from source using `make install`, the `Exec` path in the `sdn.desktop` file copied to `~/.local/share/applications/` should reflect the username of the user who ran the install command. However, always verify this path if the desktop entry doesn't work.
 
 ## Using Just the Shell
 
