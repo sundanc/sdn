@@ -569,6 +569,9 @@ int read_line_with_completion(char *buffer, int max_size, HistoryCache *cache) {
             }
             fflush(stdout); // Ensure prompt and buffer are displayed
         } else if (c == '\n' || c == '\r') {
+            // Always clear the entire line and redraw without suggestion to ensure clean display
+            printf("\033[2K\r"); // Clear the line
+            printf("%s%s", prompt, buffer); // Redraw prompt and buffer without suggestion
             printf("\n");
             break;
         } else if (c == 127 || c == '\b') { // Backspace
